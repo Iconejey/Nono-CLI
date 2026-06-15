@@ -22,7 +22,7 @@ async function callGemini(model, api_key, messages, tools) {
 			if (role === 'tool') role = 'user';
 
 			const parts = [];
-			if (msg.content) {
+			if (msg.content && msg.role !== 'tool') {
 				if (Array.isArray(msg.content)) {
 					for (const part of msg.content) {
 						if (part.type === 'text') {

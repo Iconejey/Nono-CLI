@@ -456,7 +456,15 @@ function handleAiInputKey(str) {
 		return;
 	}
 
-	if (str === '\r' || str === '\n') {
+	const newline_idx = str.search(/[\r\n]/);
+	if (newline_idx !== -1) {
+		const prefix = str.slice(0, newline_idx);
+		const printable_prefix = prefix.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+		if (printable_prefix.length > 0) {
+			ai_input = ai_input.slice(0, cursor_index) + printable_prefix + ai_input.slice(cursor_index);
+			cursor_index += printable_prefix.length;
+		}
+
 		if (is_suggesting && suggestions.length > 0 && current_suggestion_index >= 0) {
 			const selected_sug = suggestions[current_suggestion_index];
 			const selected_name = '/' + selected_sug.name;
@@ -639,7 +647,13 @@ Please continue the task or respond to the user.`
 		while (state === state_ai_running) {
 			process.stdout.write('\x1b[2mNono is thinking...\x1b[0m\r');
 
+			// Debug log outgoing payload
+			fs.appendFileSync('nono-debug.log', `\n=== CALL ===\n${JSON.stringify(current_messages, null, 2)}\n`);
+
 			const response = await callModel(model_config, current_messages, tools);
+
+			// Debug log response
+			fs.appendFileSync('nono-debug.log', `=== RESPONSE ===\n${JSON.stringify(response, null, 2)}\n`);
 
 			// Clear the "thinking..." indicator
 			process.stdout.write('\r\x1b[K');
@@ -660,6 +674,7 @@ Please continue the task or respond to the user.`
 
 					// Execute command in PTY
 					const output = await executeCommandInPty(cmd);
+					state = state_ai_running;
 
 					// Append tool result
 					const tool_result = {
