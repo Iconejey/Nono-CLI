@@ -36,8 +36,13 @@ This file is gitignored. If it doesn't exist, it will be automatically created o
 3. In **AI Mode**:
     - Type your query.
     - Press `<` multiple times to cycle between models.
-    - Press `Ctrl+R` to reload the `config.json` configuration file from disk.
+    - Type `/` to open the command menu:
+      - `/exit`: Exit the Nono terminal wrapper session entirely.
+      - `/restart`: Reload the `config.json` configuration file from disk.
+      - Use **Up/Down Arrow keys** to navigate matching commands.
+      - Press **Enter** to autocomplete the highlighted command, and **Enter** again to run it.
     - Press `Esc` to clear the query. Press `Esc` with an empty query to return to **Terminal Mode**.
     - Press `Enter` to submit the query to the AI.
 4. When the AI finishes its task, the wrapper returns to **Terminal Mode** automatically.
+
 
