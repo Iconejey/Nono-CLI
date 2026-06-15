@@ -1,0 +1,32 @@
+[
+  {
+    "provider": "gemini",
+    "title": "Gemini 2.5 Flash",
+    "model": "gemini-2.5-flash",
+    "apiKey": ""
+  },
+  {
+    "provider": "gemini",
+    "title": "Gemini 2.5 Pro",
+    "model": "gemini-2.5-pro",
+    "apiKey": ""
+  },
+  {
+    "provider": "openai",
+    "title": "GPT-4o Mini",
+    "model": "gpt-4o-mini",
+    "apiKey": ""
+  },
+  {
+    "provider": "openai",
+    "title": "GPT-4o",
+    "model": "gpt-4o",
+    "apiKey": ""
+  },
+  {
+    "provider": "anthropic",
+    "title": "Claude 3.5 Sonnet",
+    "model": "claude-3-5-sonnet-latest",
+    "apiKey": ""
+  }
+]

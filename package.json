@@ -1,0 +1,13 @@
+{
+  "name": "nono-cli",
+  "version": "1.0.0",
+  "description": "AI-powered terminal wrapper",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "nono": "./index.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
+}
