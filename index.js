@@ -437,6 +437,8 @@ function handleAiInputKey(str) {
 
 			process.stdout.write(`\n\x1b[35m--- [Nono Terminal & Chat Context] ---\n${history}\n--------------------------------------\x1b[0m\n`);
 
+			ai_input = '';
+			cursor_index = 0;
 			prev_rows = 1;
 			renderAiPrompt();
 			return;
@@ -448,6 +450,8 @@ function handleAiInputKey(str) {
 			process.exit(0);
 		}
 		if (ai_input === '/restart') {
+			ai_input = '';
+			cursor_index = 0;
 			reloadNono();
 			return;
 		}
