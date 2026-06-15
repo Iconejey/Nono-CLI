@@ -655,7 +655,7 @@ Please continue the task or respond to the user.`
 					const cmd = args.command;
 
 					// Print grey sparkle prefix (without a newline) so the PTY command echo appends to it
-					process.stdout.write(`\x1b[2m✦\x1b[0m `);
+					process.stdout.write(`\x1b[90m✦\x1b[0m `);
 					has_executed_command = true;
 
 					// Execute command in PTY
@@ -683,9 +683,9 @@ Please continue the task or respond to the user.`
 				// No tool calls, AI is finished
 				if (response.content) {
 					// Append Nono's response to terminal history
-					history_manager.append(`\x1b[1;35m✦\x1b[0m ${response.content}\n`, 'chat');
-					// Print response in a distinct style (bold purple ✦ followed by response)
-					process.stdout.write(`\x1b[1;35m✦\x1b[0m ${response.content}\n`);
+					history_manager.append(`\x1b[35m✦\x1b[0m ${response.content}\n`, 'chat');
+					// Print response in a distinct style (purple ✦ followed by response)
+					process.stdout.write(`\x1b[35m✦\x1b[0m ${response.content}\n`);
 				}
 				break;
 			}
@@ -708,7 +708,7 @@ function executeCommandInPty(cmd) {
 		command_output_buffer = '';
 
 		// Prepend the sparkle prefix to the history manager so it's recorded chronologically before the command echo
-		history_manager.append('\x1b[2m✦\x1b[0m ', 'command');
+		history_manager.append('\x1b[90m✦\x1b[0m ', 'command');
 
 		// Write command to PTY
 		pty_process.write(cmd + '\r');
