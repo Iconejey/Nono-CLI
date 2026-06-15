@@ -15,6 +15,8 @@ const state_ai_running = 'AI_RUNNING';
 const state_ai_command = 'AI_COMMAND';
 
 let state = state_terminal;
+let running_user_command = false;
+let user_command_start_time = 0;
 
 // Config and Models
 let config = loadConfig();
@@ -32,6 +34,7 @@ let prev_rows = 1;
 let waiting_for_cursor_check = false;
 let cursor_check_buffer = '';
 const all_commands = [
+	{ name: 'clear', description: 'Clear terminal command outputs from history context' },
 	{ name: 'context', description: 'Log the full terminal history context (in purple)' },
 	{ name: 'exit', description: 'Exit Nono terminal wrapper' },
 	{ name: 'restart', description: 'Reload Nono configuration' }
@@ -111,8 +114,43 @@ setTimeout(() => {
 pty_process.onData(data => {
 	last_pty_data_time = Date.now();
 
-	// Append raw data to history
-	history_manager.append(data);
+	// Process history append
+	if (state === state_terminal) {
+		if (running_user_command) {
+			const elapsed = Date.now() - user_command_start_time;
+			if (isShellInForeground() && elapsed > 150) {
+				// The command has finished and the shell printed the prompt.
+				// We split the data to separate command output from the new prompt.
+				const parts = data.split(/\r?\n/);
+				if (parts.length > 1) {
+					// All parts except the last one are command outputs
+					const output_data = parts.slice(0, -1).join('\n') + '\n';
+					history_manager.append(output_data, 'output');
+					
+					// The last part is the prompt
+					running_user_command = false;
+					history_manager.append(parts[parts.length - 1], 'command');
+				} else {
+					// Only one part, so it must be the prompt (or command finished without output)
+					running_user_command = false;
+					history_manager.append(data, 'command');
+				}
+			} else {
+				// Command is still running, all data is output
+				history_manager.append(data, 'output');
+			}
+		} else {
+			// Not running a command (user is typing at prompt), all data is command/prompt
+			history_manager.append(data, 'command');
+		}
+	} else {
+		// In AI states
+		let type = 'output';
+		if (state === state_ai_command) {
+			type = 'output';
+		}
+		history_manager.append(data, type);
+	}
 
 	// Track the last printed line (which contains the prompt)
 	const parts = data.split(/\r?\n/);
@@ -188,6 +226,10 @@ function handleStdin(data) {
 			cursor_check_buffer = '';
 			queryCursorPosition();
 		} else {
+			if (str === '\r' || str === '\n') {
+				running_user_command = true;
+				user_command_start_time = Date.now();
+			}
 			pty_process.write(data);
 		}
 	} else if (state === state_ai_input) {
@@ -429,6 +471,22 @@ function handleAiInputKey(str) {
 		}
 
 		// Execute exact matching slash commands
+		if (ai_input === '/clear') {
+			// Clear screen and move cursor to home (top-left)
+			process.stdout.write('\x1b[2J\x1b[H');
+			
+			history_manager.clearCommandOutputs();
+			const history = history_manager.getColoredHistory();
+			if (history) {
+				process.stdout.write(history + '\n');
+			}
+
+			ai_input = '';
+			cursor_index = 0;
+			prev_rows = 1;
+			renderAiPrompt();
+			return;
+		}
 		if (ai_input === '/context') {
 			// Clear suggestions menu display
 			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
@@ -527,7 +585,7 @@ async function submitAiQuery() {
 	const model_config = getEffectiveModel(config[current_model_index]);
 
 	// Append the user's query line to terminal history (replicates visual prompt on CLI)
-	history_manager.append(`\n${model_config.title}> ${ai_input}\n`);
+	history_manager.append(`\n\x1b[1;35m${model_config.title}>\x1b[0m ${ai_input}\n`, 'chat');
 
 	const current_messages = [
 		{
@@ -625,7 +683,7 @@ Please continue the task or respond to the user.`
 				// No tool calls, AI is finished
 				if (response.content) {
 					// Append Nono's response to terminal history
-					history_manager.append(`✦ ${response.content}\n`);
+					history_manager.append(`\x1b[1;35m✦\x1b[0m ${response.content}\n`, 'chat');
 					// Print response in a distinct style (bold purple ✦ followed by response)
 					process.stdout.write(`\x1b[1;35m✦\x1b[0m ${response.content}\n`);
 				}
@@ -650,7 +708,7 @@ function executeCommandInPty(cmd) {
 		command_output_buffer = '';
 
 		// Prepend the sparkle prefix to the history manager so it's recorded chronologically before the command echo
-		history_manager.append('✦ ');
+		history_manager.append('\x1b[2m✦\x1b[0m ', 'command');
 
 		// Write command to PTY
 		pty_process.write(cmd + '\r');

@@ -37,6 +37,7 @@ This file is gitignored. If it doesn't exist, it will be automatically created o
     - Type your query.
     - Press `<` multiple times to cycle between models.
     - Type `/` to open the command menu:
+      - `/clear`: Clear terminal command outputs from history context (keeps only AI chat and command inputs).
       - `/context`: Log the full clean terminal history context (in purple).
       - `/exit`: Exit the Nono terminal wrapper session entirely.
       - `/restart`: Reload the `config.json` configuration file from disk.
