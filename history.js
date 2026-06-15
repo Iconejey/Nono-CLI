@@ -11,6 +11,11 @@ export class HistoryManager {
     this.current_line = '';
   }
 
+  clear() {
+    this.lines = [];
+    this.current_line = '';
+  }
+
   append(data) {
     const parts = data.split(/\r?\n/);
     if (parts.length === 1) {

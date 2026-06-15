@@ -21,7 +21,7 @@ let config = loadConfig();
 let current_model_index = 0;
 
 // Terminal History and Prompt Tracking
-const history_manager = new HistoryManager(100);
+const history_manager = new HistoryManager(200);
 let last_pty_line = '';
 let prompt_start_column = null;
 
@@ -32,6 +32,7 @@ let prev_rows = 1;
 let waiting_for_cursor_check = false;
 let cursor_check_buffer = '';
 const all_commands = [
+	{ name: 'context', description: 'Log the full terminal history context (in purple)' },
 	{ name: 'exit', description: 'Exit Nono terminal wrapper' },
 	{ name: 'restart', description: 'Reload Nono configuration' }
 ];
@@ -325,6 +326,7 @@ function renderAiPrompt() {
 function reloadNono() {
 	try {
 		config = loadConfig();
+		history_manager.clear();
 		// Move up to the start of the prompt and clear down to erase suggestions/prompt
 		if (prev_rows > 1) {
 			process.stdout.write(`\x1b[${prev_rows - 1}A`);
@@ -342,6 +344,7 @@ function reloadNono() {
 		prev_rows = 1;
 		renderAiPrompt();
 	} catch (e) {
+		history_manager.clear();
 		if (prev_rows > 1) {
 			process.stdout.write(`\x1b[${prev_rows - 1}A`);
 		}
@@ -426,6 +429,18 @@ function handleAiInputKey(str) {
 		}
 
 		// Execute exact matching slash commands
+		if (ai_input === '/context') {
+			// Clear suggestions menu display
+			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
+			
+			const history = history_manager.getCleanHistory();
+
+			process.stdout.write(`\n\x1b[35m--- [Nono Terminal & Chat Context] ---\n${history}\n--------------------------------------\x1b[0m\n`);
+
+			prev_rows = 1;
+			renderAiPrompt();
+			return;
+		}
 		if (ai_input === '/exit') {
 			// Clear suggestions menu display
 			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
@@ -506,27 +521,33 @@ async function submitAiQuery() {
 	state = state_ai_running;
 
 	const model_config = getEffectiveModel(config[current_model_index]);
-	const messages = [
+
+	// Append the user's query line to terminal history (replicates visual prompt on CLI)
+	history_manager.append(`\n${model_config.title}> ${ai_input}\n`);
+
+	const current_messages = [
 		{
 			role: 'system',
-			content: `You are Nono, an AI-powered terminal assistant.
-You are running inside a terminal wrapper on the user's computer.
-You have the context of the terminal history.
-You can execute terminal commands to help the user.
-To execute a command, use the run_command tool.
-When running commands, prefer non-interactive flags (e.g. -y) and do not use command-line pagers (like less or more).
-After you run a command, you will see its output, and you can continue your task or respond to the user.`
-		},
-		{
-			role: 'system',
-			content: `Here is the recent terminal history for context:
----
-${history_manager.getCleanHistory()}
----`
+			content: `You are Nono, a fully autonomous AI coding agent running directly inside the user's terminal wrapper.
+Your goal is to help the user with any task they request, including coding, debugging, refactoring, and general system administration.
+You have full access to execute commands in the active terminal session using the run_command tool.
+
+Guidelines for autonomous execution:
+1. Act step-by-step. Break the user's request down into a logical plan.
+2. You can inspect files and directories (using ls, cat, grep, find, etc.).
+3. You can create, edit, or append to files using standard shell tools (e.g. cat << 'EOF' > filename, sed, echo, etc.).
+4. Run tests, compilers, or linter commands (e.g. npm test, cargo check, python test.py) to verify your changes.
+5. If a command fails or produces errors, analyze the output, correct the code/commands, and run them again. Iterate autonomously until the task is successfully accomplished.
+6. Do not explain every little step to the user in intermediate text responses; prefer to execute commands to get the job done.
+7. Once the task is fully completed and verified, summarize what was done and provide a concise final report.`
 		},
 		{
 			role: 'user',
-			content: ai_input
+			content: `Here is the current terminal session history, showing both terminal commands and our AI conversation in chronological order:
+---
+${history_manager.getCleanHistory()}
+---
+Please continue the task or respond to the user.`
 		}
 	];
 
@@ -556,13 +577,13 @@ ${history_manager.getCleanHistory()}
 		while (state === state_ai_running) {
 			process.stdout.write('\x1b[2mNono is thinking...\x1b[0m\r');
 
-			const response = await callModel(model_config, messages, tools);
+			const response = await callModel(model_config, current_messages, tools);
 
 			// Clear the "thinking..." indicator
 			process.stdout.write('\r\x1b[K');
 
 			// Append assistant's turn
-			messages.push(response);
+			current_messages.push(response);
 
 			if (response.tool_calls && response.tool_calls.length > 0) {
 				// Execute tool call(s)
@@ -579,24 +600,28 @@ ${history_manager.getCleanHistory()}
 					const output = await executeCommandInPty(cmd);
 
 					// Append tool result
-					messages.push({
+					const tool_result = {
 						role: 'tool',
 						tool_call_id: tool_call.id,
 						name: 'run_command',
 						content: output
-					});
+					};
+					current_messages.push(tool_result);
 				} else {
 					// Unsupported tool
-					messages.push({
+					const error_result = {
 						role: 'tool',
 						tool_call_id: tool_call.id,
 						name: tool_call.function.name,
 						content: `Error: Unsupported tool ${tool_call.function.name}`
-					});
+					};
+					current_messages.push(error_result);
 				}
 			} else {
 				// No tool calls, AI is finished
 				if (response.content) {
+					// Append Nono's response to terminal history
+					history_manager.append(`✦ ${response.content}\n`);
 					// Print response in a distinct style (bold purple ✦ followed by response)
 					process.stdout.write(`\x1b[1;35m✦\x1b[0m ${response.content}\n`);
 				}
@@ -624,6 +649,9 @@ function executeCommandInPty(cmd) {
 	return new Promise(resolve => {
 		state = state_ai_command;
 		command_output_buffer = '';
+
+		// Prepend the sparkle prefix to the history manager so it's recorded chronologically before the command echo
+		history_manager.append('✦ ');
 
 		// Write command to PTY
 		pty_process.write(cmd + '\r');
