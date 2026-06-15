@@ -27,6 +27,8 @@ let prompt_start_column = null;
 
 // AI Input state
 let ai_input = '';
+let cursor_index = 0;
+let prev_rows = 1;
 let waiting_for_cursor_check = false;
 let cursor_check_buffer = '';
 const all_commands = [
@@ -214,14 +216,21 @@ function enterAiMode() {
 
 	state = state_ai_input;
 	ai_input = '';
+	cursor_index = 0;
+	prev_rows = 1;
 	renderAiPrompt();
 }
 
 function exitAiMode() {
 	state = state_terminal;
+	// Clear prompt and suggestions by moving up to top line first
+	if (prev_rows > 1) {
+		process.stdout.write(`\x1b[${prev_rows - 1}A`);
+	}
+	process.stdout.write('\r\x1b[J');
 	ai_input = '';
-	// Clear prompt line and suggestions below
-	process.stdout.write('\r\x1b[K\x1b[s\n\x1b[J\x1b[u');
+	cursor_index = 0;
+	prev_rows = 1;
 	process.stdout.write(last_pty_line);
 }
 
@@ -235,6 +244,32 @@ function renderAiPrompt() {
 	if (!config || config.length === 0) return;
 	const model = config[current_model_index];
 
+	// Title prompt length (ANSI codes stripped for length calculation)
+	const title_prompt = `${model.title}> `;
+	const P = title_prompt.length;
+
+	// Total text
+	const text = title_prompt + ai_input;
+	const W = process.stdout.columns || 80;
+	const L = text.length;
+	const new_rows = Math.floor(L / W) + 1;
+
+	// 1. Move cursor up to the first line of the previous prompt
+	if (prev_rows > 1) {
+		process.stdout.write(`\x1b[${prev_rows - 1}A`);
+	}
+	process.stdout.write('\r');
+
+	// 2. Clear screen from cursor down to erase previous prompt and suggestions
+	process.stdout.write('\x1b[J');
+
+	// 3. Print the prompt prefix and ai_input
+	process.stdout.write(`\x1b[1m\x1b[35m${model.title}>\x1b[0m ${ai_input}`);
+
+	// Save current rows
+	prev_rows = new_rows;
+
+	// 4. Handle suggestions if active
 	const is_suggesting = ai_input.startsWith('/');
 	if (is_suggesting) {
 		const query = ai_input.slice(1).toLowerCase();
@@ -249,42 +284,70 @@ function renderAiPrompt() {
 			current_suggestion_index = 0;
 		}
 
-		// Print AI prompt line
-		process.stdout.write(`\r\x1b[K\x1b[1m\x1b[35m${model.title}>\x1b[0m ${ai_input}`);
+		// Save cursor position at the end of the prompt text
+		process.stdout.write(`\x1b[s`);
 
-		// Save cursor position, move to next line, clear screen below
-		process.stdout.write(`\x1b[s\n\x1b[J\x1b[u`);
-
-		// Print suggestions below the cursor
+		// Print suggestions below
 		for (let i = 0; i < suggestions.length; i++) {
 			const sug = suggestions[i];
 			const is_selected = i === current_suggestion_index;
 			const prefix = is_selected ? '\x1b[1;32m > \x1b[0m' : '   ';
 			const desc = `\x1b[2m${sug.description}\x1b[0m`;
-			process.stdout.write(`\n\r\x1b[K${prefix}/${sug.name} - ${desc}`);
+			process.stdout.write(`\n\r${prefix}/${sug.name} - ${desc}`);
 		}
 
-		// Restore cursor position
+		// Restore cursor position to the end of the prompt text
 		process.stdout.write(`\x1b[u`);
-	} else {
-		// Normal prompt, clear anything below in case suggestions were visible
-		process.stdout.write(`\r\x1b[K\x1b[1m\x1b[35m${model.title}>\x1b[0m ${ai_input}\x1b[s\n\x1b[J\x1b[u`);
+	}
+
+	// 5. Position terminal cursor at the active cursor_index
+	const target_pos = P + cursor_index;
+	const target_row = Math.floor(target_pos / W);
+	const target_col = target_pos % W;
+
+	const current_row = new_rows - 1;
+
+	// Move up from bottom row to top row of the prompt
+	if (current_row > 0) {
+		process.stdout.write(`\x1b[${current_row}A`);
+	}
+	process.stdout.write('\r');
+
+	// Move down and right to the target cursor position
+	if (target_row > 0) {
+		process.stdout.write(`\x1b[${target_row}B`);
+	}
+	if (target_col > 0) {
+		process.stdout.write(`\x1b[${target_col}C`);
 	}
 }
 
 function reloadNono() {
 	try {
 		config = loadConfig();
-		// Clear suggestions first
-		process.stdout.write(`\x1b[s\n\x1b[J\x1b[u`);
+		// Move up to the start of the prompt and clear down to erase suggestions/prompt
+		if (prev_rows > 1) {
+			process.stdout.write(`\x1b[${prev_rows - 1}A`);
+		}
+		process.stdout.write('\r\x1b[J');
+
+		// Print reload message
 		process.stdout.write(`\n\x1b[32m[Nono config reloaded]\x1b[0m\n`);
+
+		// Reset index if out of bounds
 		if (config.length > 0 && current_model_index >= config.length) {
 			current_model_index = 0;
 		}
+		// Reset height tracker since we just cleared the screen
+		prev_rows = 1;
 		renderAiPrompt();
 	} catch (e) {
-		process.stdout.write(`\x1b[s\n\x1b[J\x1b[u`);
+		if (prev_rows > 1) {
+			process.stdout.write(`\x1b[${prev_rows - 1}A`);
+		}
+		process.stdout.write('\r\x1b[J');
 		process.stdout.write(`\n\x1b[31m[Error reloading config: ${e.message}]\x1b[0m\n`);
+		prev_rows = 1;
 		renderAiPrompt();
 	}
 }
@@ -318,10 +381,29 @@ function handleAiInputKey(str) {
 		return;
 	}
 
+	// Handle left/right cursor arrow keys
+	if (str === '\x1b[D' || str === '\x1bOD') {
+		// Left Arrow
+		if (cursor_index > 0) {
+			cursor_index--;
+			renderAiPrompt();
+		}
+		return;
+	}
+	if (str === '\x1b[C' || str === '\x1bOC') {
+		// Right Arrow
+		if (cursor_index < ai_input.length) {
+			cursor_index++;
+			renderAiPrompt();
+		}
+		return;
+	}
+
 	if (str === '\x1b') {
 		// Escape
 		if (ai_input.length > 0) {
 			ai_input = '';
+			cursor_index = 0;
 			renderAiPrompt();
 		} else {
 			exitAiMode();
@@ -336,6 +418,7 @@ function handleAiInputKey(str) {
 			if (ai_input !== selected_name) {
 				// Autocomplete the name
 				ai_input = selected_name;
+				cursor_index = ai_input.length;
 				current_suggestion_index = 0;
 				renderAiPrompt();
 				return;
@@ -362,10 +445,11 @@ function handleAiInputKey(str) {
 	}
 
 	if (str === '\x7f' || str === '\x08') {
-		// Backspace
-		if (ai_input.length > 0) {
-			ai_input = ai_input.slice(0, -1);
-			renderAiPrompt(); // Redraw prompt and suggestions
+		// Backspace at cursor position
+		if (cursor_index > 0) {
+			ai_input = ai_input.slice(0, cursor_index - 1) + ai_input.slice(cursor_index);
+			cursor_index--;
+			renderAiPrompt();
 		}
 		return;
 	}
@@ -376,19 +460,48 @@ function handleAiInputKey(str) {
 	}
 
 	if (str.startsWith('\x1b')) {
-		// Ignore escape sequences (like arrows)
+		// Ignore other escape sequences
 		return;
 	}
 
 	// Handle printable text / paste
 	const printable = str.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
 	if (printable.length > 0) {
-		ai_input += printable;
+		ai_input = ai_input.slice(0, cursor_index) + printable + ai_input.slice(cursor_index);
+		cursor_index += printable.length;
 		renderAiPrompt();
 	}
 }
 
+function prepareForAiSubmission() {
+	if (!config || config.length === 0) return;
+	const model = config[current_model_index];
+	const P = `${model.title}> `.length;
+	const L = P + ai_input.length;
+	const W = process.stdout.columns || 80;
+	const new_rows = Math.floor(L / W) + 1;
+
+	// Render prompt leaves the cursor at target_row.
+	// Move the cursor back to top row of the prompt, then move to bottom row of prompt
+	const target_pos = P + cursor_index;
+	const target_row = Math.floor(target_pos / W);
+
+	if (target_row > 0) {
+		process.stdout.write(`\x1b[${target_row}A`);
+	}
+	process.stdout.write('\r');
+
+	const last_row = new_rows - 1;
+	if (last_row > 0) {
+		process.stdout.write(`\x1b[${last_row}B`);
+	}
+
+	// Clear any suggestions below it
+	process.stdout.write(`\x1b[s\n\x1b[J\x1b[u`);
+}
+
 async function submitAiQuery() {
+	prepareForAiSubmission();
 	process.stdout.write('\n');
 	state = state_ai_running;
 
