@@ -632,17 +632,12 @@ Please continue the task or respond to the user.`
 		process.stdout.write(`\r\x1b[K\x1b[31mError: ${error.message}\x1b[0m\n`);
 	}
 
-	// Restore terminal mode
-	state = state_terminal;
+	// Stay in AI mode
+	state = state_ai_input;
 	ai_input = '';
-
-	// Reprint the saved shell prompt to return to original state
-	process.stdout.write(last_pty_line);
-
-	// Query its new column
-	setTimeout(() => {
-		queryCursorPosition();
-	}, 100);
+	cursor_index = 0;
+	prev_rows = 1;
+	renderAiPrompt();
 }
 
 function executeCommandInPty(cmd) {
