@@ -458,8 +458,8 @@ ${history_manager.getCleanHistory()}
 					const args = JSON.parse(tool_call.function.arguments);
 					const cmd = args.command;
 
-					// Print running status
-					process.stdout.write(`\x1b[2m[Nono runs: ${cmd}]\x1b[0m\n`);
+					// Print grey sparkle prefix (without a newline) so the PTY command echo appends to it
+					process.stdout.write(`\x1b[2m✦\x1b[0m `);
 					has_executed_command = true;
 
 					// Execute command in PTY
@@ -484,8 +484,8 @@ ${history_manager.getCleanHistory()}
 			} else {
 				// No tool calls, AI is finished
 				if (response.content) {
-					// Print response in a distinct style (bold ✦ followed by response)
-					process.stdout.write(`\x1b[1m✦\x1b[0m ${response.content}\n`);
+					// Print response in a distinct style (bold purple ✦ followed by response)
+					process.stdout.write(`\x1b[1;35m✦\x1b[0m ${response.content}\n`);
 				}
 				break;
 			}
