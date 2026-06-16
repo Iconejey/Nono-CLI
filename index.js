@@ -646,6 +646,60 @@ Please continue the task or respond to the user.`
 					required: ['command']
 				}
 			}
+		},
+		{
+			type: 'function',
+			function: {
+				name: 'read_file',
+				description: 'Read the contents of a file. Optionally specify start_line and end_line (1-indexed, inclusive) to read a specific range.',
+				parameters: {
+					type: 'object',
+					properties: {
+						path: {
+							type: 'string',
+							description: 'The relative or absolute path of the file to read.'
+						},
+						start_line: {
+							type: 'integer',
+							description: 'The 1-indexed start line number (inclusive).'
+						},
+						end_line: {
+							type: 'integer',
+							description: 'The 1-indexed end line number (inclusive).'
+						}
+					},
+					required: ['path']
+				}
+			}
+		},
+		{
+			type: 'function',
+			function: {
+				name: 'edit_file',
+				description: 'Create, overwrite, or edit a file. For edits, specify the target substring block to replace and the replacement. For creating or overwriting, specify content.',
+				parameters: {
+					type: 'object',
+					properties: {
+						path: {
+							type: 'string',
+							description: 'The relative or absolute path of the file to write or edit.'
+						},
+						content: {
+							type: 'string',
+							description: 'The full file content. Use this to create or completely overwrite a file.'
+						},
+						target: {
+							type: 'string',
+							description: 'The exact substring block in the file to replace.'
+						},
+						replacement: {
+							type: 'string',
+							description: 'The new substring block to replace the target with.'
+						}
+					},
+					required: ['path']
+				}
+			}
 		}
 	];
 
@@ -709,6 +763,128 @@ Please continue the task or respond to the user.`
 						role: 'tool',
 						tool_call_id: tool_call.id,
 						name: 'run_command',
+						content: output
+					};
+					current_messages.push(tool_result);
+				} else if (tool_call.function.name === 'read_file') {
+					const args = JSON.parse(tool_call.function.arguments);
+					const file_path = args.path;
+					const start_line = args.start_line;
+					const end_line = args.end_line;
+
+					const filename = path.basename(file_path);
+					let action_str = `Reading ${filename}`;
+					if (start_line !== undefined && end_line !== undefined) {
+						action_str += ` (${start_line}-${end_line})`;
+					} else if (start_line !== undefined) {
+						action_str += ` (${start_line}-)`;
+					} else if (end_line !== undefined) {
+						action_str += ` (1-${end_line})`;
+					}
+
+					// Print action line in terminal
+					process.stdout.write(`\x1b[90m✦\x1b[0m ${action_str}\n`);
+					history_manager.append(`\x1b[90m✦\x1b[0m ${action_str}\n`, 'command');
+
+					// Perform the file read
+					let output = '';
+					try {
+						const absolute_path = path.resolve(process.cwd(), file_path);
+						const file_content = fs.readFileSync(absolute_path, 'utf8');
+						if (start_line !== undefined || end_line !== undefined) {
+							const lines = file_content.split(/\r?\n/);
+							const start = start_line !== undefined ? Math.max(1, start_line) - 1 : 0;
+							const end = end_line !== undefined ? Math.min(lines.length, end_line) : lines.length;
+							output = lines.slice(start, end).join('\n');
+						} else {
+							output = file_content;
+						}
+					} catch (err) {
+						output = `Error reading file: ${err.message}`;
+					}
+
+					// Append tool result
+					const tool_result = {
+						role: 'tool',
+						tool_call_id: tool_call.id,
+						name: 'read_file',
+						content: output
+					};
+					current_messages.push(tool_result);
+				} else if (tool_call.function.name === 'edit_file') {
+					const args = JSON.parse(tool_call.function.arguments);
+					const file_path = args.path;
+					const content = args.content;
+					const target = args.target;
+					const replacement = args.replacement;
+
+					const filename = path.basename(file_path);
+					let output = '';
+					let removed_lines = 0;
+					let added_lines = 0;
+
+					try {
+						const absolute_path = path.resolve(process.cwd(), file_path);
+						const file_exists = fs.existsSync(absolute_path);
+
+						if (target !== undefined && replacement !== undefined) {
+							if (!file_exists) {
+								throw new Error(`File does not exist for target replacement: ${file_path}`);
+							}
+							const existing_content = fs.readFileSync(absolute_path, 'utf8');
+							if (!existing_content.includes(target)) {
+								throw new Error(`Target content not found in file.`);
+							}
+							// Check if target appears multiple times
+							const occurrences = existing_content.split(target).length - 1;
+							if (occurrences > 1) {
+								throw new Error(`Target content is ambiguous (found ${occurrences} occurrences).`);
+							}
+
+							removed_lines = target.split(/\r?\n/).length;
+							added_lines = replacement.split(/\r?\n/).length;
+
+							const new_content = existing_content.replace(target, replacement);
+							fs.writeFileSync(absolute_path, new_content, 'utf8');
+							output = `Successfully edited file: ${file_path}`;
+						} else if (content !== undefined) {
+							let existing_lines = 0;
+							if (file_exists) {
+								const existing_content = fs.readFileSync(absolute_path, 'utf8');
+								existing_lines = existing_content.split(/\r?\n/).length;
+							}
+							removed_lines = existing_lines;
+							added_lines = content.split(/\r?\n/).length;
+
+							// Create parent directories if they don't exist
+							const parent_dir = path.dirname(absolute_path);
+							if (!fs.existsSync(parent_dir)) {
+								fs.mkdirSync(parent_dir, { recursive: true });
+							}
+
+							fs.writeFileSync(absolute_path, content, 'utf8');
+							output = `Successfully wrote file: ${file_path}`;
+						} else {
+							throw new Error('Either content or both target and replacement must be provided.');
+						}
+					} catch (err) {
+						output = `Error writing file: ${err.message}`;
+					}
+
+					let action_str = `Editing ${filename}`;
+					if (removed_lines > 0 || added_lines > 0) {
+						action_str += ` -${removed_lines} +${added_lines}`;
+					}
+
+					// Print action line in terminal
+					process.stdout.write(`\x1b[90m✦\x1b[0m ${action_str}\n`);
+					history_manager.append(`\x1b[90m✦\x1b[0m ${action_str}\n`, 'command');
+
+					// Append tool result
+					const tool_result = {
+						role: 'tool',
+						tool_call_id: tool_call.id,
+						name: 'edit_file',
 						content: output
 					};
 					current_messages.push(tool_result);
