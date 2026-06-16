@@ -1,13 +1,13 @@
 // Use native fetch (available globally in Node 18+)
 
-export async function callModel({ provider, model, apiKey: api_key, baseURL: base_url }, messages, tools) {
-	if (provider === 'gemini') return callGemini(model, api_key, messages, tools);
-	else if (provider === 'openai') return callOpenAI(model, api_key, base_url, messages, tools);
-	else if (provider === 'anthropic') return callAnthropic(model, api_key, messages, tools);
+export async function callModel({ provider, model, apiKey: api_key, baseURL: base_url }, messages, tools, options = {}) {
+	if (provider === 'gemini') return callGemini(model, api_key, messages, tools, options);
+	else if (provider === 'openai') return callOpenAI(model, api_key, base_url, messages, tools, options);
+	else if (provider === 'anthropic') return callAnthropic(model, api_key, messages, tools, options);
 	else throw new Error(`Unsupported provider: ${provider}`);
 }
 
-async function callGemini(model, api_key, messages, tools) {
+async function callGemini(model, api_key, messages, tools, options) {
 	// Convert standard messages to Gemini contents format
 	const contents = messages
 		.map(msg => {
@@ -22,6 +22,16 @@ async function callGemini(model, api_key, messages, tools) {
 			if (role === 'tool') role = 'user';
 
 			const parts = [];
+			if (msg.thinking_parts) {
+				for (const tp of msg.thinking_parts) {
+					parts.push({
+						text: tp.text,
+						thought: true,
+						...(tp.thoughtSignature ? { thoughtSignature: tp.thoughtSignature } : {})
+					});
+				}
+			}
+
 			if (msg.content && msg.role !== 'tool') {
 				if (Array.isArray(msg.content)) {
 					for (const part of msg.content) {
@@ -96,7 +106,8 @@ async function callGemini(model, api_key, messages, tools) {
 			contents,
 			systemInstruction: system_instruction,
 			tools: gemini_tools
-		})
+		}),
+		...(options && options.signal ? { signal: options.signal } : {})
 	});
 
 	if (!response.ok) {
@@ -111,12 +122,15 @@ async function callGemini(model, api_key, messages, tools) {
 	}
 
 	const parts = candidate.content?.parts || [];
-	const text_part = parts.find(p => p.text);
+	const thought_parts = parts.filter(p => p.thought);
+	const text_part = parts.find(p => p.text && !p.thought);
 	const func_call_part = parts.find(p => p.functionCall);
 
 	const result = {
 		role: 'assistant',
-		content: text_part ? text_part.text : ''
+		content: text_part ? text_part.text : '',
+		thinking: thought_parts.map(p => p.text).join('\n'),
+		thinking_parts: thought_parts
 	};
 
 	if (func_call_part) {
@@ -135,7 +149,7 @@ async function callGemini(model, api_key, messages, tools) {
 	return result;
 }
 
-async function callOpenAI(model, api_key, base_url, messages, tools) {
+async function callOpenAI(model, api_key, base_url, messages, tools, options) {
 	const url = `${base_url || 'https://api.openai.com/v1'}/chat/completions`;
 
 	// Format messages for OpenAI API
@@ -167,7 +181,8 @@ async function callOpenAI(model, api_key, base_url, messages, tools) {
 			model,
 			messages: formatted_messages,
 			tools: tools
-		})
+		}),
+		...(options && options.signal ? { signal: options.signal } : {})
 	});
 
 	if (!response.ok) {
@@ -184,11 +199,12 @@ async function callOpenAI(model, api_key, base_url, messages, tools) {
 	return {
 		role: 'assistant',
 		content: message.content || '',
-		tool_calls: message.tool_calls
+		tool_calls: message.tool_calls,
+		thinking: message.reasoning_content || ''
 	};
 }
 
-async function callAnthropic(model, api_key, messages, tools) {
+async function callAnthropic(model, api_key, messages, tools, options) {
 	const url = 'https://api.anthropic.com/v1/messages';
 
 	const system_message = messages.find(msg => msg.role === 'system');
@@ -235,6 +251,9 @@ async function callAnthropic(model, api_key, messages, tools) {
 			anthropic_messages.push({ role: 'user', content });
 		} else if (msg.role === 'assistant') {
 			const content = [];
+			if (msg.thinking_blocks) {
+				content.push(...msg.thinking_blocks);
+			}
 			if (msg.content) {
 				content.push({ type: 'text', text: msg.content });
 			}
@@ -290,7 +309,8 @@ async function callAnthropic(model, api_key, messages, tools) {
 			system,
 			messages: anthropic_messages,
 			tools: anthropic_tools
-		})
+		}),
+		...(options && options.signal ? { signal: options.signal } : {})
 	});
 
 	if (!response.ok) {
@@ -302,11 +322,16 @@ async function callAnthropic(model, api_key, messages, tools) {
 
 	let content_text = '';
 	const tool_calls = [];
+	const thinking_blocks = [];
 
 	if (Array.isArray(data.content)) {
 		for (const item of data.content) {
 			if (item.type === 'text') {
 				content_text += item.text;
+			} else if (item.type === 'thinking') {
+				thinking_blocks.push(item);
+			} else if (item.type === 'redacted_thinking') {
+				thinking_blocks.push(item);
 			} else if (item.type === 'tool_use') {
 				tool_calls.push({
 					id: item.id,
@@ -320,9 +345,14 @@ async function callAnthropic(model, api_key, messages, tools) {
 		}
 	}
 
-	return {
+	const result = {
 		role: 'assistant',
 		content: content_text,
-		...(tool_calls.length > 0 ? { tool_calls: tool_calls } : {})
+		thinking: thinking_blocks.map(b => b.thinking || '').join('\n'),
+		thinking_blocks: thinking_blocks
 	};
+	if (tool_calls.length > 0) {
+		result.tool_calls = tool_calls;
+	}
+	return result;
 }

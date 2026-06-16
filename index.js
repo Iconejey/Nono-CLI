@@ -31,6 +31,7 @@ let prompt_start_column = null;
 let ai_input = '';
 let cursor_index = 0;
 let prev_rows = 1;
+let current_abort_controller = null;
 let waiting_for_cursor_check = false;
 let cursor_check_buffer = '';
 const all_commands = [
@@ -126,7 +127,7 @@ pty_process.onData(data => {
 					// All parts except the last one are command outputs
 					const output_data = parts.slice(0, -1).join('\n') + '\n';
 					history_manager.append(output_data, 'output');
-					
+
 					// The last part is the prompt
 					running_user_command = false;
 					history_manager.append(parts[parts.length - 1], 'command');
@@ -234,6 +235,12 @@ function handleStdin(data) {
 		}
 	} else if (state === state_ai_input) {
 		handleAiInputKey(str);
+	} else if (state === state_ai_running) {
+		if (str === '\x1b') {
+			if (current_abort_controller) {
+				current_abort_controller.abort();
+			}
+		}
 	} else if (state === state_ai_command) {
 		// Pipe input to PTY (interactive command support like sudo password or aborting)
 		pty_process.write(data);
@@ -482,7 +489,7 @@ function handleAiInputKey(str) {
 		if (ai_input === '/clear') {
 			// Clear screen and move cursor to home (top-left)
 			process.stdout.write('\x1b[2J\x1b[H');
-			
+
 			history_manager.clearCommandOutputs();
 			const history = history_manager.getColoredHistory();
 			if (history) {
@@ -498,7 +505,7 @@ function handleAiInputKey(str) {
 		if (ai_input === '/context') {
 			// Clear suggestions menu display
 			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
-			
+
 			const history = history_manager.getCleanHistory();
 
 			process.stdout.write(`\n\x1b[35m--- [Nono Terminal & Chat Context] ---\n${history}\n--------------------------------------\x1b[0m\n`);
@@ -598,7 +605,8 @@ async function submitAiQuery() {
 	const current_messages = [
 		{
 			role: 'system',
-			content: `You are Nono, a fully autonomous AI coding agent running directly inside the user's terminal wrapper.
+			content: `
+You are Nono, a fully autonomous AI coding agent running directly inside the user's terminal wrapper.
 Your goal is to help the user with any task they request, including coding, debugging, refactoring, and general system administration.
 You have full access to execute commands in the active terminal session using the run_command tool.
 
@@ -647,16 +655,36 @@ Please continue the task or respond to the user.`
 		while (state === state_ai_running) {
 			process.stdout.write('\x1b[2mNono is thinking...\x1b[0m\r');
 
+			current_abort_controller = new AbortController();
+
 			// Debug log outgoing payload
 			fs.appendFileSync('nono-debug.log', `\n=== CALL ===\n${JSON.stringify(current_messages, null, 2)}\n`);
 
-			const response = await callModel(model_config, current_messages, tools);
+			const response = await callModel(model_config, current_messages, tools, { signal: current_abort_controller.signal });
+
+			// Clear current_abort_controller
+			current_abort_controller = null;
 
 			// Debug log response
 			fs.appendFileSync('nono-debug.log', `=== RESPONSE ===\n${JSON.stringify(response, null, 2)}\n`);
 
 			// Clear the "thinking..." indicator
 			process.stdout.write('\r\x1b[K');
+
+			if (response.thinking) {
+				const W = process.stdout.columns || 80;
+				const lines = response.thinking.split('\n');
+				let total_rows = 0;
+				for (const line of lines) {
+					total_rows += Math.floor(line.length / W) + 1;
+					process.stdout.write(`\x1b[90m${line}\x1b[0m\n`);
+					await new Promise(r => setTimeout(r, 45)); // organic typing delay
+				}
+				await new Promise(r => setTimeout(r, 1200)); // allow reading
+				if (total_rows > 0) {
+					process.stdout.write(`\x1b[${total_rows}A\r\x1b[J`);
+				}
+			}
 
 			// Append assistant's turn
 			current_messages.push(response);
@@ -706,7 +734,12 @@ Please continue the task or respond to the user.`
 			}
 		}
 	} catch (error) {
-		process.stdout.write(`\r\x1b[K\x1b[31mError: ${error.message}\x1b[0m\n`);
+		current_abort_controller = null;
+		if (error.name === 'AbortError' || error.message.includes('aborted') || error.message.includes('cancel')) {
+			process.stdout.write(`\r\x1b[K\x1b[90m[Request cancelled]\x1b[0m\n`);
+		} else {
+			process.stdout.write(`\r\x1b[K\x1b[31mError: ${error.message}\x1b[0m\n`);
+		}
 	}
 
 	// Stay in AI mode
