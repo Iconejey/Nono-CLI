@@ -6,5 +6,9 @@
 	"type": "module",
 	"bin": {
 		"nono": "./index.js"
+	},
+	"dependencies": {
+		"@google/genai": "^2.10.0",
+		"dotenv": "^17.4.2"
 	}
 }
