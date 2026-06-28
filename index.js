@@ -19,8 +19,10 @@ dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
 
 const api_key = process.env.GEMINI_API_KEY;
 const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
+const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 
-if (!api_key && process.argv[2] !== '--details') {
+if (!api_key && process.argv[2] !== '--details' && process.argv[2] !== '--test-audio') {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -87,7 +89,7 @@ function finishProgress(final_text) {
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	console.log(`\x1b[35m✦ ${final_text.trim()}\x1b[0m\n`);
-	playSound('complete');
+	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
 }
 
@@ -96,37 +98,130 @@ function finishProgressError(err_msg) {
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m\n`);
-	playSound('error');
+	playChime('error');
 	writeDetails(`\n[Fatal Error]\n${err_msg}`);
 }
 
-// Helper to play sound
-function playSound(type) {
-	// Always trigger the terminal bell character first
-	process.stdout.write('\x07');
-
-	let sound_file = 'window-question.oga';
-	if (type === 'attention') {
-		sound_file = 'window-attention.oga';
-	} else if (type === 'error') {
-		sound_file = 'dialog-error.oga';
-	} else if (type === 'complete') {
-		sound_file = 'complete.oga';
+// Helper to generate a WAV file buffer containing pure synthesized tones
+function generateChimeWav(tones, sample_rate = 44100) {
+	let max_duration = 0;
+	for (const tone of tones) {
+		max_duration = Math.max(max_duration, tone.start + tone.duration);
 	}
 
-	const full_path = `/usr/share/sounds/freedesktop/stereo/${sound_file}`;
-	const player = fs.existsSync('/usr/bin/pw-play') ? 'pw-play' : fs.existsSync('/usr/bin/paplay') ? 'paplay' : null;
+	const num_samples = Math.floor(sample_rate * max_duration);
+	const buffer = Buffer.alloc(44 + num_samples * 2); // 16-bit mono PCM
 
-	if (player && fs.existsSync(full_path)) {
-		// Run the audio player detached/non-blocking
-		spawn(player, [full_path], { stdio: 'ignore', detached: true }).unref();
+	const samples = new Float32Array(num_samples);
+
+	for (const tone of tones) {
+		const start_sample = Math.floor(sample_rate * tone.start);
+		const tone_samples = Math.floor(sample_rate * tone.duration);
+		const freq = tone.freq;
+		const type = tone.type || 'sine';
+		const gain = tone.gain !== undefined ? tone.gain : 0.15;
+
+		for (let i = 0; i < tone_samples; i++) {
+			const idx = start_sample + i;
+			if (idx >= num_samples) break;
+
+			const t = i / sample_rate;
+			let val = 0;
+
+			if (type === 'sine') {
+				val = Math.sin(2 * Math.PI * freq * t);
+			} else if (type === 'triangle') {
+				const period = 1 / freq;
+				const phase = (t % period) / period;
+				val = phase < 0.5 ? 4 * phase - 1 : 3 - 4 * phase;
+			}
+
+			// Apply smooth fade out to avoid clicks
+			const fade_out_start = tone_samples - Math.floor(sample_rate * 0.04); // 40ms fade
+			if (i > fade_out_start) {
+				const fade_ratio = (tone_samples - i) / (tone_samples - fade_out_start);
+				val *= fade_ratio;
+			}
+
+			samples[idx] += val * gain;
+		}
+	}
+
+	const data_size = num_samples * 2;
+	buffer.write('RIFF', 0);
+	buffer.writeUInt32LE(36 + data_size, 4);
+	buffer.write('WAVE', 8);
+	buffer.write('fmt ', 12);
+	buffer.writeUInt32LE(16, 16);
+	buffer.writeUInt16LE(1, 20); // PCM
+	buffer.writeUInt16LE(1, 22); // Mono
+	buffer.writeUInt32LE(sample_rate, 24);
+	buffer.writeUInt32LE(sample_rate * 2, 28);
+	buffer.writeUInt16LE(2, 32);
+	buffer.writeUInt16LE(16, 34);
+	buffer.write('data', 36);
+	buffer.writeUInt32LE(data_size, 40);
+
+	for (let i = 0; i < num_samples; i++) {
+		const sample = Math.max(-32768, Math.min(32767, Math.floor(samples[i] * 32767)));
+		buffer.writeInt16LE(sample, 44 + i * 2);
+	}
+
+	return buffer;
+}
+
+// Helper to play synthesized chimes matching Nono-Terminal
+function playChime(type) {
+	process.stdout.write('\x07');
+
+	let tones = [];
+	if (type === 'question' || type === 'fingerprint' || type === 'user_interaction_needed') {
+		// Soft two-tone major 6th chime (A4 to E5) - User Interaction Needed
+		tones = [
+			{ freq: 440, start: 0, duration: 0.35, type: 'sine', gain: 0.18 },
+			{ freq: 659.25, start: 0.18, duration: 0.45, type: 'sine', gain: 0.18 }
+		];
+	} else if (type === 'complete') {
+		// Smooth major chord cascade chime (C5, E5, G5)
+		tones = [
+			{ freq: 523.25, start: 0, duration: 0.15, type: 'sine', gain: 0.12 },
+			{ freq: 659.25, start: 0.08, duration: 0.15, type: 'sine', gain: 0.12 },
+			{ freq: 783.99, start: 0.16, duration: 0.4, type: 'sine', gain: 0.15 }
+		];
+	} else if (type === 'error') {
+		// Low descending minor sound (A4 to F4)
+		tones = [
+			{ freq: 440, start: 0, duration: 0.15, type: 'sine', gain: 0.15 },
+			{ freq: 349.23, start: 0.12, duration: 0.4, type: 'sine', gain: 0.15 }
+		];
+	} else {
+		return;
+	}
+
+	// Scale volume using the configured volume scale factor
+	tones.forEach(t => t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale);
+
+	try {
+		const wav_buffer = generateChimeWav(tones);
+		const temp_path = path.join(os.tmpdir(), `nono-chime-${type}.wav`);
+		fs.writeFileSync(temp_path, wav_buffer);
+
+		const player = fs.existsSync('/usr/bin/pw-play') 
+			? 'pw-play' 
+			: (fs.existsSync('/usr/bin/paplay') ? 'paplay' : (fs.existsSync('/usr/bin/aplay') ? 'aplay' : null));
+
+		if (player) {
+			spawn(player, [temp_path], { stdio: 'ignore', detached: true }).unref();
+		}
+	} catch (err) {
+		// Ignore audio errors
 	}
 }
 
 // Helper to ask the user a question / confirmation
 function askUser(question) {
 	clearProgress();
-	playSound('question');
+	playChime('question');
 	return new Promise(resolve => {
 		const rl = readline.createInterface({
 			input: process.stdin,
@@ -227,7 +322,7 @@ function runProjectDryRun(modified_file_path) {
 					const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
 					writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
 					updateProgress(`• Dry-run validation failed`);
-					playSound('error');
+					playChime('error');
 					return {
 						dry_run: {
 							command,
@@ -267,7 +362,7 @@ function runProjectDryRun(modified_file_path) {
 			const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
 			writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
 			updateProgress(`• Dry-run validation failed`);
-			playSound('error');
+			playChime('error');
 			return {
 				dry_run: {
 					command,
@@ -463,7 +558,7 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 			execSync('sudo -n true', { stdio: 'ignore' });
 		} catch (e) {
 			console.log(`\n\x1b[33m🔑 sudo credential caching required. Please authenticate when prompted:\x1b[0m`);
-			playSound('attention');
+			playChime('fingerprint');
 			try {
 				execSync('sudo true', { stdio: 'inherit' });
 			} catch (err) {
@@ -658,6 +753,33 @@ async function main() {
 		}
 	}
 
+	// Handle nono --test-audio argument
+	if (process.argv[2] === '--test-audio') {
+		const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+		
+		console.log(`\n\x1b[35m=== Nono Audio Diagnostics ===\x1b[0m`);
+		console.log(`Current Volume Level: ${Math.round(volume_scale * 100)}%\n`);
+
+		console.log(`• Playing: User Interaction Needed Chime`);
+		console.log(`  \x1b[90mMeaning: Played when Nono asks a question or requires sudo credential authentication.\x1b[0m`);
+		playChime('user_interaction_needed');
+		await sleep(1500);
+
+		console.log(`• Playing: Success Chime`);
+		console.log(`  \x1b[90mMeaning: Played at the end of a task when Nono finishes successfully.\x1b[0m`);
+		playChime('complete');
+		await sleep(1500);
+
+		console.log(`• Playing: Error Chime`);
+		console.log(`  \x1b[90mMeaning: Played when a task fails or a dry-run check throws errors.\x1b[0m`);
+		playChime('error');
+		await sleep(1500);
+
+		console.log(`\n\x1b[32m✔ Audio diagnostics complete!\x1b[0m\n`);
+		process.exit(0);
+		return;
+	}
+
 	// Capture CLI arguments
 	let user_query = process.argv.slice(2).join(' ');
 
@@ -836,6 +958,6 @@ async function main() {
 
 main().catch(err => {
 	console.error('\x1b[31mFatal error:\x1b[0m', err);
-	playSound('error');
+	playChime('error');
 	process.exit(1);
 });
