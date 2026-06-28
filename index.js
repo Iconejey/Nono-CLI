@@ -585,13 +585,63 @@ function viewFileContents({ file_path, start_line, end_line }) {
 	};
 }
 
+// Helper to format supported text files using Prettier
+function formatWithPrettier(file_path) {
+	const ext = path.extname(file_path).toLowerCase();
+	const formatable_exts = ['.js', '.jsx', '.ts', '.tsx', '.json', '.css', '.scss', '.html', '.md', '.markdown', '.yaml', '.yml'];
+	if (formatable_exts.includes(ext)) {
+		try {
+			execSync(`npx -y prettier --write ${JSON.stringify(file_path)}`, { stdio: 'ignore' });
+		} catch (err) {
+			// Ignore formatter errors (e.g. syntax errors or missing prettier)
+		}
+	}
+}
+
+// Helper to compute added and removed lines count between two file states (using LCS)
+function getLineDiff(oldStr, newStr) {
+	if (!oldStr) {
+		const added = newStr ? newStr.split(/\r?\n/).length : 0;
+		return { deleted: 0, added };
+	}
+	const oldLines = oldStr.split(/\r?\n/);
+	const newLines = newStr ? newStr.split(/\r?\n/) : [];
+	const m = oldLines.length;
+	const n = newLines.length;
+
+	// Cap to avoid high memory/CPU on massive files
+	if (m > 1000 || n > 1000) {
+		return { deleted: m, added: n };
+	}
+
+	const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+	for (let i = 1; i <= m; i++) {
+		for (let j = 1; j <= n; j++) {
+			if (oldLines[i - 1] === newLines[j - 1]) {
+				dp[i][j] = dp[i - 1][j - 1] + 1;
+			} else {
+				dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+			}
+		}
+	}
+	const lcs = dp[m][n];
+	return { deleted: m - lcs, added: n - lcs };
+}
+
 function writeFile({ file_path, content }) {
 	const abs_path = path.resolve(file_path);
 	const dir = path.dirname(abs_path);
 	if (!fs.existsSync(dir)) {
 		fs.mkdirSync(dir, { recursive: true });
 	}
+	const old_content = fs.existsSync(abs_path) ? fs.readFileSync(abs_path, 'utf8') : '';
 	fs.writeFileSync(abs_path, content, 'utf8');
+
+	formatWithPrettier(abs_path);
+
+	const final_content = fs.readFileSync(abs_path, 'utf8');
+	const { deleted, added } = getLineDiff(old_content, final_content);
+	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -606,9 +656,9 @@ function patchFile({ file_path, search_block, replace_block }) {
 	if (!fs.existsSync(abs_path)) {
 		throw new Error(`File does not exist: ${file_path}`);
 	}
-	const content = fs.readFileSync(abs_path, 'utf8');
+	const old_content = fs.readFileSync(abs_path, 'utf8');
 
-	const normalized_content = content.replace(/\r\n/g, '\n');
+	const normalized_content = old_content.replace(/\r\n/g, '\n');
 	const normalized_search = search_block.replace(/\r\n/g, '\n');
 	const normalized_replace = replace_block.replace(/\r\n/g, '\n');
 
@@ -624,6 +674,12 @@ function patchFile({ file_path, search_block, replace_block }) {
 
 	const patched_content = normalized_content.slice(0, index) + normalized_replace + normalized_content.slice(index + normalized_search.length);
 	fs.writeFileSync(abs_path, patched_content, 'utf8');
+
+	formatWithPrettier(abs_path);
+
+	const final_content = fs.readFileSync(abs_path, 'utf8');
+	const { deleted, added } = getLineDiff(old_content, final_content);
+	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
