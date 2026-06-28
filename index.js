@@ -33,6 +33,7 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 // Global Progress & Logging State
 let progress_lines = [];
 let lines_printed_last_time = 0;
+let total_shifted_out_lines = 0;
 let start_time = Date.now();
 let details_path = '';
 
@@ -43,7 +44,10 @@ function writeDetails(text) {
 }
 
 function formatProgressLine(text) {
-	const ansi_prefix = '\x1b[90m';
+	let ansi_prefix = '\x1b[90m'; // Default gray
+	if (text.includes('High-impact') || text.includes('caching required')) {
+		ansi_prefix = '\x1b[31m'; // Red
+	}
 	const ansi_suffix = '\x1b[0m';
 	const max_len = Math.min(80, (process.stdout.columns || 80) - 5);
 
@@ -60,8 +64,15 @@ function renderProgress() {
 			process.stdout.write('\x1b[A\x1b[2K');
 		}
 	}
-	for (const line of progress_lines) {
-		process.stdout.write(line + '\n');
+	for (let i = 0; i < progress_lines.length; i++) {
+		const line = progress_lines[i];
+		const is_last = i === progress_lines.length - 1;
+		const is_prompt = line.includes('[Y/n]') || line.includes('[y/N]');
+		if (is_last && is_prompt) {
+			process.stdout.write(line);
+		} else {
+			process.stdout.write(line + '\n');
+		}
 	}
 	lines_printed_last_time = progress_lines.length;
 }
@@ -71,33 +82,39 @@ function updateProgress(raw_text) {
 	progress_lines.push(line);
 	if (progress_lines.length > 5) {
 		progress_lines.shift();
+		total_shifted_out_lines++;
 	}
 	renderProgress();
 }
 
-function clearProgress() {
-	if (lines_printed_last_time > 0) {
-		for (let i = 0; i < lines_printed_last_time; i++) {
+function clearProgress(clear_all = false) {
+	const lines_to_clear = clear_all ? (lines_printed_last_time + total_shifted_out_lines) : lines_printed_last_time;
+	if (lines_to_clear > 0) {
+		for (let i = 0; i < lines_to_clear; i++) {
 			process.stdout.write('\x1b[A\x1b[2K');
 		}
 		lines_printed_last_time = 0;
 	}
+	if (clear_all) {
+		total_shifted_out_lines = 0;
+	}
+	progress_lines = [];
 }
 
 function finishProgress(final_text) {
-	clearProgress();
+	clearProgress(true);
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
-	console.log(`\x1b[35m✦ ${final_text.trim()}\x1b[0m\n`);
+	console.log(`\x1b[35m✦ ${final_text.trim()}\x1b[0m`);
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
 }
 
 function finishProgressError(err_msg) {
-	clearProgress();
+	clearProgress(true);
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
-	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m\n`);
+	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
 	playChime('error');
 	writeDetails(`\n[Fatal Error]\n${err_msg}`);
 }
@@ -229,8 +246,53 @@ function askUser(question) {
 		});
 		rl.question(question, answer => {
 			rl.close();
-			renderProgress();
 			resolve(answer);
+		});
+	});
+}
+
+function askUserInRoll(question) {
+	playChime('question');
+	updateProgress(question);
+
+	return new Promise((resolve) => {
+		const rl = readline.createInterface({
+			input: process.stdin,
+			output: process.stdout,
+			terminal: true
+		});
+		rl.on('line', (line) => {
+			rl.close();
+			resolve(line);
+		});
+	});
+}
+
+// Helper to run sudo true interactively and capture stdout/stderr in the roll
+function runInteractiveSudo() {
+	return new Promise((resolve, reject) => {
+		const child = spawn('sudo', ['true'], { stdio: ['inherit', 'pipe', 'pipe'] });
+
+		child.stdout.on('data', (data) => {
+			const text = data.toString().trim();
+			if (text) {
+				updateProgress(`• ${text}`);
+			}
+		});
+
+		child.stderr.on('data', (data) => {
+			const text = data.toString().trim();
+			if (text) {
+				updateProgress(`• ${text}`);
+			}
+		});
+
+		child.on('close', (code) => {
+			if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(`Sudo authentication failed.`));
+			}
 		});
 	});
 }
@@ -541,10 +603,10 @@ function searchGrep({ pattern, directory_path }) {
 
 async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 	if (isHighImpactCommand(command)) {
-		console.log(`\n\x1b[31m⚠️ High-impact action detected: "${command}"\x1b[0m`);
-		const answer = await askUser(`Do you want to run this command? [y/N]: `);
+		updateProgress(`• High-impact action detected: "${command}"`);
+		const answer = await askUserInRoll(`Do you want to run this command? [Y/n]: `);
 		const norm = answer.trim().toLowerCase();
-		if (norm !== 'y' && norm !== 'yes') {
+		if (norm !== '' && norm !== 'y' && norm !== 'yes') {
 			return {
 				status: 'error',
 				error: 'Execution cancelled by the user.'
@@ -557,10 +619,10 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 		try {
 			execSync('sudo -n true', { stdio: 'ignore' });
 		} catch (e) {
-			console.log(`\n\x1b[33m🔑 sudo credential caching required. Please authenticate when prompted:\x1b[0m`);
+			updateProgress(`• sudo credential caching required. Please authenticate when prompted:`);
 			playChime('fingerprint');
 			try {
-				execSync('sudo true', { stdio: 'inherit' });
+				await runInteractiveSudo();
 			} catch (err) {
 				return {
 					status: 'error',
@@ -840,9 +902,10 @@ async function main() {
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
+	updateProgress('• Thinking...');
+
 	// Start the ReAct execution loop
 	while (true) {
-		updateProgress('• Thinking...');
 		try {
 			const response = await ai.models.generateContent({
 				model: model_name,
@@ -887,9 +950,9 @@ async function main() {
 				break;
 			}
 
-			// Execute requested functions in parallel
+			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
 			const response_parts = [];
-			const execution_promises = function_calls.map(async call_part => {
+			for (const call_part of function_calls) {
 				const call = call_part.functionCall;
 				const { name, args, id } = call;
 
@@ -932,11 +995,8 @@ async function main() {
 				if (id) {
 					function_response_part.functionResponse.id = id;
 				}
-				return function_response_part;
-			});
-
-			const results = await Promise.all(execution_promises);
-			response_parts.push(...results);
+				response_parts.push(function_response_part);
+			}
 
 			// Push user/tool execution results back into the conversation history
 			history.push({
