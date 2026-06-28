@@ -58,6 +58,59 @@ function formatProgressLine(text) {
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
+// Helper to format markdown text beautifully for the terminal output
+function formatMarkdownForTerminal(md) {
+	if (!md) return '';
+	const lines = md.split('\n');
+	const formatted_lines = [];
+	let in_code_block = false;
+
+	for (let line of lines) {
+		// Handle Code Block delimiters
+		if (line.trim().startsWith('```')) {
+			in_code_block = !in_code_block;
+			continue;
+		}
+
+		if (in_code_block) {
+			// Style code block lines: dim gray with a left border
+			formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${line}\x1b[0m`);
+			continue;
+		}
+
+		// Handle Headers: convert ### Title to Bold Purple
+		const header_match = /^#{1,6}\s+(.*)$/.exec(line);
+		if (header_match) {
+			const header_text = header_match[1];
+			formatted_lines.push(`\x1b[1;35m${header_text}\x1b[0m`);
+			continue;
+		}
+
+		// Handle Unordered List Items: convert * item or - item to • item
+		const list_match = /^(\s*)[-*]\s+(.*)$/.exec(line);
+		if (list_match) {
+			const indent = list_match[1];
+			const content = list_match[2];
+			line = `${indent}• ${content}`;
+		}
+
+		// Process inline styles
+		// 1. Inline code: `code` -> cyan
+		line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
+
+		// 2. Bold: **text** -> Bold Yellow
+		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1;33m$1\x1b[0m');
+
+		// 3. Italics: *text* or _text_ -> Underline Dim Gray
+		line = line.replace(/\*([^*]+)\*/g, '\x1b[4;90m$1\x1b[0m');
+		line = line.replace(/_([^_]+)_/g, '\x1b[4;90m$1\x1b[0m');
+
+		formatted_lines.push(line);
+	}
+
+	return formatted_lines.join('\n');
+}
+
 function renderProgress() {
 	if (lines_printed_last_time > 0) {
 		for (let i = 0; i < lines_printed_last_time; i++) {
@@ -105,7 +158,8 @@ function finishProgress(final_text) {
 	clearProgress(true);
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
-	console.log(`\x1b[35m✦ ${final_text.trim()}\x1b[0m`);
+	const formatted = formatMarkdownForTerminal(final_text.trim());
+	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
 }
@@ -838,6 +892,34 @@ async function main() {
 		await sleep(1500);
 
 		console.log(`\n\x1b[32m✔ Audio diagnostics complete!\x1b[0m\n`);
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --test-format argument
+	if (process.argv[2] === '--test-format') {
+		const test_markdown = `### System Status & Sudo Verification
+Here is the diagnostics output from the elevated test environment:
+
+- **Command executed**: \`sudo systemctl status fprintd\`
+- **Status**: \`active (running)\`
+- **Elapsed execution time**: 4s
+
+### Security & Access Policy
+1. **Passwordless Access**: Active.
+2. **Elevated Privileges**: Fully verified.
+
+Here is the raw system logs payload:
+\`\`\`text
+Jun 29 00:34:40 host systemd[1]: Starting Fingerprint Authentication Daemon...
+Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
+\`\`\`
+
+*Note: Please ensure the PAM module rules are kept aligned with the security constraints.*`;
+
+		console.log(`\n\x1b[35m=== Nono Markdown Formatting Test ===\x1b[0m\n`);
+		console.log(`\x1b[35m✦\x1b[0m ${formatMarkdownForTerminal(test_markdown)}`);
+		console.log();
 		process.exit(0);
 		return;
 	}
