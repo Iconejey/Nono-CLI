@@ -730,6 +730,33 @@ const tools_mapping = {
 	propose_terminal_input: proposeTerminalInput
 };
 
+// Helper to get OS description dynamically
+function getOSDescription() {
+	try {
+		if (process.platform === 'linux') {
+			if (fs.existsSync('/etc/os-release')) {
+				const release = fs.readFileSync('/etc/os-release', 'utf8');
+				const name_match = /^PRETTY_NAME="([^"]+)"/m.exec(release) || /^NAME="([^"]+)"/m.exec(release);
+				if (name_match) {
+					return name_match[1];
+				}
+			}
+			return 'Linux';
+		}
+		if (process.platform === 'darwin') {
+			return 'macOS';
+		}
+		if (process.platform === 'win32') {
+			return 'Windows';
+		}
+		return `${os.type()} ${os.release()}`;
+	} catch (e) {
+		return 'Linux';
+	}
+}
+
+const os_name = getOSDescription();
+
 // ----------------------------------------------------
 // Gemini Tool Declarations
 // ----------------------------------------------------
@@ -799,7 +826,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'execute_system_command',
-		description: 'Executes a non-blocking or blocking bash command on the Arch Linux host. Returns stdout, stderr, and exit status code.',
+		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code.`,
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -823,7 +850,7 @@ const tools_declarations = [
 ];
 
 const system_prompt = `You are Nono, an ultra-efficient CLI AI Agent & Coding Workspace Specialist.
-You run on an Arch Linux host and operate in one of two modes:
+You run on a ${os_name} host and operate in one of two modes:
 1. System Admin Mode: Focused on minimal, precise system calls (NetworkManager, systemctl, diagnostics).
 2. Workspace Developer Mode: Focused on codebase understanding, editing, and software engineering.
 
