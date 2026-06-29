@@ -571,12 +571,21 @@ function viewFileContents({ file_path, start_line, end_line }) {
 	const end = end_line ? Math.min(lines.length, end_line) : lines.length;
 
 	const sliced_lines = lines.slice(start - 1, end);
+	let raw_content = sliced_lines.join('\n');
+	let is_truncated = false;
+	const max_chars = 30000;
+	if (raw_content.length > max_chars) {
+		raw_content = raw_content.slice(0, max_chars) + '\n[... Content truncated to prevent excessive token usage ...]';
+		is_truncated = true;
+	}
+
 	return {
 		file_path,
 		total_lines: lines.length,
 		start_line: start,
 		end_line: end,
-		content: sliced_lines.join('\n')
+		is_truncated,
+		content: raw_content
 	};
 }
 
@@ -697,9 +706,17 @@ function searchGrep({ pattern, directory_path }) {
 					error: stderr || error.message
 				});
 			} else {
+				const max_chars = 30000;
+				let matches = stdout.trim() || 'No matches found.';
+				let is_truncated = false;
+				if (matches.length > max_chars) {
+					matches = matches.slice(0, max_chars) + '\n[... Matches truncated to prevent excessive token usage ...]';
+					is_truncated = true;
+				}
 				resolve({
 					status: 'success',
-					matches: stdout.trim() || 'No matches found.'
+					is_truncated,
+					matches: matches
 				});
 			}
 		});
@@ -739,9 +756,26 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 
 	return new Promise(resolve => {
 		exec(command, { timeout: timeout_ms }, (error, stdout, stderr) => {
+			const max_chars = 30000;
+			let truncated_stdout = stdout;
+			let truncated_stderr = stderr;
+			let stdout_truncated = false;
+			let stderr_truncated = false;
+
+			if (stdout && stdout.length > max_chars) {
+				truncated_stdout = stdout.slice(0, max_chars) + '\n[... stdout truncated to prevent excessive token usage ...]';
+				stdout_truncated = true;
+			}
+			if (stderr && stderr.length > max_chars) {
+				truncated_stderr = stderr.slice(0, max_chars) + '\n[... stderr truncated to prevent excessive token usage ...]';
+				stderr_truncated = true;
+			}
+
 			resolve({
-				stdout: stdout,
-				stderr: stderr,
+				stdout: truncated_stdout,
+				stderr: truncated_stderr,
+				stdout_truncated,
+				stderr_truncated,
 				exit_code: error ? error.code || 1 : 0
 			});
 		});
@@ -827,7 +861,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'view_file_contents',
-		description: 'Reads the exact content of a file. Supports line-range targeting for processing large source files safely.',
+		description: 'Reads the content of a file. Supports line-range targeting. Note: Outputs exceeding 30,000 characters will be truncated.',
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -865,7 +899,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'search_grep',
-		description: 'Performs a fast regex-based substring search across the workspace (equivalent to ripgrep) to find references or declarations.',
+		description: 'Performs a fast regex-based substring search across the workspace (equivalent to ripgrep) to find references or declarations. Note: Outputs exceeding 30,000 characters will be truncated.',
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -877,7 +911,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'execute_system_command',
-		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code.`,
+		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code. Note: stdout and stderr exceeding 30,000 characters each will be truncated.`,
 		parameters: {
 			type: 'OBJECT',
 			properties: {
