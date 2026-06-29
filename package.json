@@ -1,13 +1,14 @@
 {
-  "name": "nono-cli",
-  "version": "1.0.0",
-  "description": "AI-powered terminal wrapper",
-  "main": "index.js",
-  "type": "module",
-  "bin": {
-    "nono": "./index.js"
-  },
-  "dependencies": {
-    "node-pty": "^1.1.0"
-  }
+	"name": "nono-cli",
+	"version": "1.0.0",
+	"description": "Bring Nono, your coding agent, directly into your temrinal.",
+	"main": "index.js",
+	"type": "module",
+	"bin": {
+		"nono": "./index.js"
+	},
+	"dependencies": {
+		"@google/genai": "^2.10.0",
+		"dotenv": "^17.4.2"
+	}
 }

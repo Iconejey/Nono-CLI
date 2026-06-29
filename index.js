@@ -1,981 +1,1188 @@
 #!/usr/bin/env node
 
-import pty from 'node-pty';
-import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { callModel } from './api.js';
-import { loadConfig, getEffectiveModel } from './config.js';
-import { HistoryManager, stripAnsi } from './history.js';
+import os from 'os';
+import { fileURLToPath } from 'url';
+import { exec, execSync, spawn } from 'child_process';
+import readline from 'readline';
+import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
 
-// States
-const state_terminal = 'TERMINAL';
-const state_ai_input = 'AI_INPUT';
-const state_ai_running = 'AI_RUNNING';
-const state_ai_command = 'AI_COMMAND';
+// Load environment variables from the directory of this script or fallback locations
+const dir_name = path.dirname(fileURLToPath(import.meta.url));
+process.env.DOTENV_LOG_LEVEL = 'none';
+process.env.DOTENVX_LOG_LEVEL = 'none';
+dotenv.config({ path: path.join(dir_name, '.env'), quiet: true });
+dotenv.config({ path: path.join(os.homedir(), '.config', 'nono', '.env'), quiet: true });
+dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
 
-let state = state_terminal;
-let running_user_command = false;
-let user_command_start_time = 0;
+const api_key = process.env.GEMINI_API_KEY;
+const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
+const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 
-// Config and Models
-let config = loadConfig();
-let current_model_index = 0;
+if (!api_key && process.argv[2] !== '--details' && process.argv[2] !== '--test-audio') {
+	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
+	console.error('Please configure your GEMINI_API_KEY in a .env file.');
+	process.exit(1);
+}
 
-// Terminal History and Prompt Tracking
-const history_manager = new HistoryManager(200);
-let last_pty_line = '';
-let prompt_start_column = null;
+const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 
-// AI Input state
-let ai_input = '';
-let cursor_index = 0;
-let prev_rows = 1;
-let current_abort_controller = null;
-let waiting_for_cursor_check = false;
-let cursor_check_buffer = '';
-const all_commands = [
-	{ name: 'clear', description: 'Clear terminal command outputs from history context' },
-	{ name: 'context', description: 'Log the full terminal history context (in purple)' },
-	{ name: 'exit', description: 'Exit Nono terminal wrapper' },
-	{ name: 'restart', description: 'Reload Nono configuration' }
-];
-let current_suggestion_index = 0;
+// Global Progress & Logging State
+let progress_lines = [];
+let lines_printed_last_time = 0;
+let total_shifted_out_lines = 0;
+let start_time = Date.now();
+let details_path = '';
 
-// Command execution state
-let command_output_buffer = '';
-let on_command_finished = null;
-let command_check_interval = null;
-let last_pty_data_time = Date.now();
-
-// Spawn shell PTY
-const shell = process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : 'bash');
-const pty_process = pty.spawn(shell, [], {
-	name: 'xterm-256color',
-	cols: process.stdout.columns || 80,
-	rows: process.stdout.rows || 24,
-	cwd: process.cwd(),
-	env: {
-		...process.env,
-		// Ensure terminal wrapper info or colors work nicely
-		TERM: 'xterm-256color'
-	}
-});
-
-// Setup stdin/stdout
-process.stdin.setRawMode(true);
-process.stdin.resume();
-process.stdin.setEncoding('utf8');
-
-// Handle window resizing
-process.stdout.on('resize', () => {
-	const cols = process.stdout.columns || 80;
-	const rows = process.stdout.rows || 24;
-	pty_process.resize(cols, rows);
-});
-
-// Get process groups to check if a command is running in the foreground
-function getPgrpAndTpgid(pid) {
-	try {
-		const stat = fs.readFileSync(path.join('/proc', String(pid), 'stat'), 'utf8');
-		const last_paren = stat.lastIndexOf(')');
-		if (last_paren === -1) return null;
-		const fields = stat
-			.substring(last_paren + 2)
-			.trim()
-			.split(/\s+/);
-		return {
-			pgrp: parseInt(fields[2], 10),
-			tpgid: parseInt(fields[5], 10)
-		};
-	} catch (e) {
-		return null;
+function writeDetails(text) {
+	if (details_path) {
+		fs.appendFileSync(details_path, text + '\n', 'utf8');
 	}
 }
 
-function isShellInForeground() {
-	const stats = getPgrpAndTpgid(pty_process.pid);
-	if (!stats) return true; // Fallback to true if we can't check
-	return stats.pgrp === stats.tpgid;
-}
-
-// Query current cursor position from the terminal emulator
-function queryCursorPosition() {
-	if (state === state_terminal) {
-		process.stdout.write('\x1b[6n');
+function formatProgressLine(text) {
+	let ansi_prefix = '\x1b[90m'; // Default gray
+	if (text.includes('High-impact') || text.includes('caching required')) {
+		ansi_prefix = '\x1b[31m'; // Red
 	}
+	const ansi_suffix = '\x1b[0m';
+	const max_len = Math.min(80, (process.stdout.columns || 80) - 5);
+
+	let raw = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+	if (raw.length > max_len) {
+		raw = raw.slice(0, max_len - 3) + '...';
+	}
+	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
-// Initialize prompt column shortly after startup
-setTimeout(() => {
-	queryCursorPosition();
-}, 300);
+// Helper to format markdown text beautifully for the terminal output
+function formatMarkdownForTerminal(md) {
+	if (!md) return '';
+	const lines = md.split('\n');
+	const formatted_lines = [];
+	let in_code_block = false;
 
-// PTY -> Term Output
-pty_process.onData(data => {
-	last_pty_data_time = Date.now();
-
-	// Process history append
-	if (state === state_terminal) {
-		if (running_user_command) {
-			const elapsed = Date.now() - user_command_start_time;
-			if (isShellInForeground() && elapsed > 150) {
-				// The command has finished and the shell printed the prompt.
-				// We split the data to separate command output from the new prompt.
-				const parts = data.split(/\r?\n/);
-				if (parts.length > 1) {
-					// All parts except the last one are command outputs
-					const output_data = parts.slice(0, -1).join('\n') + '\n';
-					history_manager.append(output_data, 'output');
-
-					// The last part is the prompt
-					running_user_command = false;
-					history_manager.append(parts[parts.length - 1], 'command');
-				} else {
-					// Only one part, so it must be the prompt (or command finished without output)
-					running_user_command = false;
-					history_manager.append(data, 'command');
-				}
-			} else {
-				// Command is still running, all data is output
-				history_manager.append(data, 'output');
-			}
-		} else {
-			// Not running a command (user is typing at prompt), all data is command/prompt
-			history_manager.append(data, 'command');
+	for (let line of lines) {
+		// Handle Code Block delimiters
+		if (line.trim().startsWith('```')) {
+			in_code_block = !in_code_block;
+			continue;
 		}
+
+		if (in_code_block) {
+			// Style code block lines: dim gray with a left border
+			formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${line}\x1b[0m`);
+			continue;
+		}
+
+		// Handle Headers: convert ### Title to Bold Purple
+		const header_match = /^#{1,6}\s+(.*)$/.exec(line);
+		if (header_match) {
+			const header_text = header_match[1];
+			formatted_lines.push(`\x1b[1;35m${header_text}\x1b[0m`);
+			continue;
+		}
+
+		// Handle Unordered List Items: convert * item or - item to • item
+		const list_match = /^(\s*)[-*]\s+(.*)$/.exec(line);
+		if (list_match) {
+			const indent = list_match[1];
+			const content = list_match[2];
+			line = `${indent}• ${content}`;
+		}
+
+		// Process inline styles
+		// 1. Inline code: `code` -> cyan
+		line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
+
+		// 2. Bold: **text** -> Bold Yellow
+		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1;33m$1\x1b[0m');
+
+		// 3. Italics: *text* or _text_ -> Underline Dim Gray
+		line = line.replace(/\*([^*]+)\*/g, '\x1b[4;90m$1\x1b[0m');
+		line = line.replace(/_([^_]+)_/g, '\x1b[4;90m$1\x1b[0m');
+
+		formatted_lines.push(line);
+	}
+
+	return formatted_lines.join('\n');
+}
+
+function renderProgress() {
+	if (lines_printed_last_time > 0) {
+		for (let i = 0; i < lines_printed_last_time; i++) {
+			process.stdout.write('\x1b[A\x1b[2K');
+		}
+	}
+	for (let i = 0; i < progress_lines.length; i++) {
+		const line = progress_lines[i];
+		const is_last = i === progress_lines.length - 1;
+		const is_prompt = line.includes('[Y/n]') || line.includes('[y/N]');
+		if (is_last && is_prompt) {
+			process.stdout.write(line);
+		} else {
+			process.stdout.write(line + '\n');
+		}
+	}
+	lines_printed_last_time = progress_lines.length;
+}
+
+function updateProgress(raw_text) {
+	const line = formatProgressLine(raw_text);
+	progress_lines.push(line);
+	if (progress_lines.length > 5) {
+		progress_lines.shift();
+		total_shifted_out_lines++;
+	}
+	renderProgress();
+}
+
+function clearProgress(clear_all = false) {
+	const lines_to_clear = clear_all ? (lines_printed_last_time + total_shifted_out_lines) : lines_printed_last_time;
+	if (lines_to_clear > 0) {
+		for (let i = 0; i < lines_to_clear; i++) {
+			process.stdout.write('\x1b[A\x1b[2K');
+		}
+		lines_printed_last_time = 0;
+	}
+	if (clear_all) {
+		total_shifted_out_lines = 0;
+	}
+	progress_lines = [];
+}
+
+function finishProgress(final_text) {
+	clearProgress(true);
+	const elapsed = Math.round((Date.now() - start_time) / 1000);
+	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
+	const formatted = formatMarkdownForTerminal(final_text.trim());
+	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
+	playChime('complete');
+	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
+}
+
+function finishProgressError(err_msg) {
+	clearProgress(true);
+	const elapsed = Math.round((Date.now() - start_time) / 1000);
+	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
+	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
+	playChime('error');
+	writeDetails(`\n[Fatal Error]\n${err_msg}`);
+}
+
+// Helper to generate a WAV file buffer containing pure synthesized tones
+function generateChimeWav(tones, sample_rate = 44100) {
+	let max_duration = 0;
+	for (const tone of tones) {
+		max_duration = Math.max(max_duration, tone.start + tone.duration);
+	}
+
+	const num_samples = Math.floor(sample_rate * max_duration);
+	const buffer = Buffer.alloc(44 + num_samples * 2); // 16-bit mono PCM
+
+	const samples = new Float32Array(num_samples);
+
+	for (const tone of tones) {
+		const start_sample = Math.floor(sample_rate * tone.start);
+		const tone_samples = Math.floor(sample_rate * tone.duration);
+		const freq = tone.freq;
+		const type = tone.type || 'sine';
+		const gain = tone.gain !== undefined ? tone.gain : 0.15;
+
+		for (let i = 0; i < tone_samples; i++) {
+			const idx = start_sample + i;
+			if (idx >= num_samples) break;
+
+			const t = i / sample_rate;
+			let val = 0;
+
+			if (type === 'sine') {
+				val = Math.sin(2 * Math.PI * freq * t);
+			} else if (type === 'triangle') {
+				const period = 1 / freq;
+				const phase = (t % period) / period;
+				val = phase < 0.5 ? 4 * phase - 1 : 3 - 4 * phase;
+			}
+
+			// Apply smooth fade out to avoid clicks
+			const fade_out_start = tone_samples - Math.floor(sample_rate * 0.04); // 40ms fade
+			if (i > fade_out_start) {
+				const fade_ratio = (tone_samples - i) / (tone_samples - fade_out_start);
+				val *= fade_ratio;
+			}
+
+			samples[idx] += val * gain;
+		}
+	}
+
+	const data_size = num_samples * 2;
+	buffer.write('RIFF', 0);
+	buffer.writeUInt32LE(36 + data_size, 4);
+	buffer.write('WAVE', 8);
+	buffer.write('fmt ', 12);
+	buffer.writeUInt32LE(16, 16);
+	buffer.writeUInt16LE(1, 20); // PCM
+	buffer.writeUInt16LE(1, 22); // Mono
+	buffer.writeUInt32LE(sample_rate, 24);
+	buffer.writeUInt32LE(sample_rate * 2, 28);
+	buffer.writeUInt16LE(2, 32);
+	buffer.writeUInt16LE(16, 34);
+	buffer.write('data', 36);
+	buffer.writeUInt32LE(data_size, 40);
+
+	for (let i = 0; i < num_samples; i++) {
+		const sample = Math.max(-32768, Math.min(32767, Math.floor(samples[i] * 32767)));
+		buffer.writeInt16LE(sample, 44 + i * 2);
+	}
+
+	return buffer;
+}
+
+// Helper to play synthesized chimes matching Nono-Terminal
+function playChime(type) {
+	process.stdout.write('\x07');
+
+	let tones = [];
+	if (type === 'question' || type === 'fingerprint' || type === 'user_interaction_needed') {
+		// Soft two-tone major 6th chime (A4 to E5) - User Interaction Needed
+		tones = [
+			{ freq: 440, start: 0, duration: 0.35, type: 'sine', gain: 0.18 },
+			{ freq: 659.25, start: 0.18, duration: 0.45, type: 'sine', gain: 0.18 }
+		];
+	} else if (type === 'complete') {
+		// Smooth major chord cascade chime (C5, E5, G5)
+		tones = [
+			{ freq: 523.25, start: 0, duration: 0.15, type: 'sine', gain: 0.12 },
+			{ freq: 659.25, start: 0.08, duration: 0.15, type: 'sine', gain: 0.12 },
+			{ freq: 783.99, start: 0.16, duration: 0.4, type: 'sine', gain: 0.15 }
+		];
+	} else if (type === 'error') {
+		// Low descending minor sound (A4 to F4)
+		tones = [
+			{ freq: 440, start: 0, duration: 0.15, type: 'sine', gain: 0.15 },
+			{ freq: 349.23, start: 0.12, duration: 0.4, type: 'sine', gain: 0.15 }
+		];
 	} else {
-		// In AI states
-		let type = 'output';
-		if (state === state_ai_command) {
-			type = 'output';
-		}
-		history_manager.append(data, type);
-	}
-
-	// Track the last printed line (which contains the prompt)
-	const parts = data.split(/\r?\n/);
-	if (parts.length === 1) {
-		last_pty_line += parts[0];
-	} else {
-		last_pty_line = parts[parts.length - 1];
-	}
-
-	// Pipe to stdout based on state
-	if (state === state_terminal) {
-		process.stdout.write(data);
-	} else if (state === state_ai_command) {
-		process.stdout.write(data);
-		command_output_buffer += data;
-	}
-});
-
-// Shell exit
-pty_process.onExit(({ exitCode }) => {
-	process.exit(exitCode);
-});
-
-// Stdin handler
-process.stdin.on('data', data => {
-	handleStdin(data);
-});
-
-function handleStdin(data) {
-	const str = data.toString('utf8');
-
-	// 1. Intercept Cursor Position Response: \x1b[row;colR
-	const cursor_match = str.match(/\x1b\[(\d+);(\d+)R/);
-	if (cursor_match) {
-		const col = parseInt(cursor_match[2], 10);
-		const remaining = str.replace(/\x1b\[\d+;\d+R/, '');
-
-		if (waiting_for_cursor_check) {
-			waiting_for_cursor_check = false;
-			if (prompt_start_column === null || col === prompt_start_column) {
-				prompt_start_column = col; // Save or update
-				enterAiMode();
-				if (cursor_check_buffer.length > 0) {
-					ai_input += cursor_check_buffer;
-					process.stdout.write(cursor_check_buffer);
-				}
-			} else {
-				// Not at prompt start, forward '<' and anything typed during check to PTY
-				pty_process.write('<' + cursor_check_buffer);
-			}
-			cursor_check_buffer = '';
-		} else {
-			prompt_start_column = col;
-		}
-
-		if (remaining.length > 0) {
-			handleStdin(Buffer.from(remaining, 'utf8'));
-		}
 		return;
 	}
 
-	// 2. If waiting for cursor check, buffer all keys
-	if (waiting_for_cursor_check) {
-		cursor_check_buffer += str;
-		return;
-	}
-
-	// 3. Process based on current state
-	if (state === state_terminal) {
-		// Check if '<' is pressed and shell is idle
-		if (str === '<' && isShellInForeground()) {
-			waiting_for_cursor_check = true;
-			cursor_check_buffer = '';
-			queryCursorPosition();
-		} else {
-			if (str === '\r' || str === '\n') {
-				running_user_command = true;
-				user_command_start_time = Date.now();
-			}
-			pty_process.write(data);
-		}
-	} else if (state === state_ai_input) {
-		handleAiInputKey(str);
-	} else if (state === state_ai_running) {
-		if (str === '\x1b') {
-			if (current_abort_controller) {
-				current_abort_controller.abort();
-			}
-		}
-	} else if (state === state_ai_command) {
-		// Pipe input to PTY (interactive command support like sudo password or aborting)
-		pty_process.write(data);
-	}
-}
-
-function enterAiMode() {
-	if (!config || config.length === 0) {
-		process.stdout.write(`\n\x1b[31mError: No models configured. Please check your config.json file in the Nono directory.\x1b[0m\n`);
-		process.stdout.write(last_pty_line);
-		state = state_terminal;
-		return;
-	}
-
-	const model_config = getEffectiveModel(config[current_model_index]);
-	if (!model_config.apiKey) {
-		process.stdout.write(`\n\x1b[31mError: API key for ${model_config.title} is not set.\x1b[0m\n`);
-		process.stdout.write(`Please configure it in the config.json file in the Nono directory.\n`);
-		process.stdout.write(last_pty_line);
-		state = state_terminal;
-		return;
-	}
-
-	state = state_ai_input;
-	ai_input = '';
-	cursor_index = 0;
-	prev_rows = 1;
-	renderAiPrompt();
-}
-
-function exitAiMode() {
-	state = state_terminal;
-	// Clear prompt and suggestions by moving up to top line first
-	if (prev_rows > 1) {
-		process.stdout.write(`\x1b[${prev_rows - 1}A`);
-	}
-	process.stdout.write('\r\x1b[J');
-	ai_input = '';
-	cursor_index = 0;
-	prev_rows = 1;
-	process.stdout.write(last_pty_line);
-}
-
-function loopModel() {
-	if (!config || config.length === 0) return;
-	current_model_index = (current_model_index + 1) % config.length;
-	renderAiPrompt();
-}
-
-function renderAiPrompt() {
-	if (!config || config.length === 0) return;
-	const model = config[current_model_index];
-
-	// Title prompt length (ANSI codes stripped for length calculation)
-	const title_prompt = `${model.title}> `;
-	const P = title_prompt.length;
-
-	// Total text
-	const text = title_prompt + ai_input;
-	const W = process.stdout.columns || 80;
-	const L = text.length;
-	const new_rows = Math.floor(L / W) + 1;
-
-	// 1. Move cursor up to the first line of the previous prompt
-	if (prev_rows > 1) {
-		process.stdout.write(`\x1b[${prev_rows - 1}A`);
-	}
-	process.stdout.write('\r');
-
-	// 2. Clear screen from cursor down to erase previous prompt and suggestions
-	process.stdout.write('\x1b[J');
-
-	// 3. Print the prompt prefix and ai_input
-	process.stdout.write(`\x1b[1m\x1b[35m${model.title}>\x1b[0m ${ai_input}`);
-
-	// Save current rows
-	prev_rows = new_rows;
-
-	// 4. Handle suggestions if active
-	const is_suggesting = ai_input.startsWith('/');
-	if (is_suggesting) {
-		const query = ai_input.slice(1).toLowerCase();
-		const suggestions = all_commands.filter(c => c.name.startsWith(query));
-
-		// Cap suggestion index
-		if (suggestions.length === 0) {
-			current_suggestion_index = -1;
-		} else if (current_suggestion_index >= suggestions.length) {
-			current_suggestion_index = suggestions.length - 1;
-		} else if (current_suggestion_index < 0 && suggestions.length > 0) {
-			current_suggestion_index = 0;
-		}
-
-		// Save cursor position at the end of the prompt text
-		process.stdout.write(`\x1b[s`);
-
-		// Print suggestions below
-		for (let i = 0; i < suggestions.length; i++) {
-			const sug = suggestions[i];
-			const is_selected = i === current_suggestion_index;
-			const prefix = is_selected ? '\x1b[1;32m > \x1b[0m' : '   ';
-			const desc = `\x1b[2m${sug.description}\x1b[0m`;
-			process.stdout.write(`\n\r${prefix}/${sug.name} - ${desc}`);
-		}
-
-		// Restore cursor position to the end of the prompt text
-		process.stdout.write(`\x1b[u`);
-	}
-
-	// 5. Position terminal cursor at the active cursor_index
-	const target_pos = P + cursor_index;
-	const target_row = Math.floor(target_pos / W);
-	const target_col = target_pos % W;
-
-	const current_row = new_rows - 1;
-
-	// Move up from bottom row to top row of the prompt
-	if (current_row > 0) {
-		process.stdout.write(`\x1b[${current_row}A`);
-	}
-	process.stdout.write('\r');
-
-	// Move down and right to the target cursor position
-	if (target_row > 0) {
-		process.stdout.write(`\x1b[${target_row}B`);
-	}
-	if (target_col > 0) {
-		process.stdout.write(`\x1b[${target_col}C`);
-	}
-}
-
-function reloadNono() {
-	try {
-		config = loadConfig();
-		history_manager.clear();
-		// Move up to the start of the prompt and clear down to erase suggestions/prompt
-		if (prev_rows > 1) {
-			process.stdout.write(`\x1b[${prev_rows - 1}A`);
-		}
-		process.stdout.write('\r\x1b[J');
-
-		// Print reload message
-		process.stdout.write(`\n\x1b[32m[Nono config reloaded]\x1b[0m\n`);
-
-		// Reset index if out of bounds
-		if (config.length > 0 && current_model_index >= config.length) {
-			current_model_index = 0;
-		}
-		// Reset height tracker since we just cleared the screen
-		prev_rows = 1;
-		renderAiPrompt();
-	} catch (e) {
-		history_manager.clear();
-		if (prev_rows > 1) {
-			process.stdout.write(`\x1b[${prev_rows - 1}A`);
-		}
-		process.stdout.write('\r\x1b[J');
-		process.stdout.write(`\n\x1b[31m[Error reloading config: ${e.message}]\x1b[0m\n`);
-		prev_rows = 1;
-		renderAiPrompt();
-	}
-}
-
-function handleAiInputKey(str) {
-	if (str === '\x03') {
-		// Ctrl+C
-		exitAiMode();
-		return;
-	}
-
-	const is_suggesting = ai_input.startsWith('/');
-	const query = is_suggesting ? ai_input.slice(1).toLowerCase() : '';
-	const suggestions = is_suggesting ? all_commands.filter(c => c.name.startsWith(query)) : [];
-
-	// Handle arrow navigation when suggestions are active
-	if (str === '\x1b[A' || str === '\x1bOA') {
-		// Up Arrow
-		if (is_suggesting && suggestions.length > 0) {
-			current_suggestion_index = (current_suggestion_index - 1 + suggestions.length) % suggestions.length;
-			renderAiPrompt();
-		}
-		return;
-	}
-	if (str === '\x1b[B' || str === '\x1bOB') {
-		// Down Arrow
-		if (is_suggesting && suggestions.length > 0) {
-			current_suggestion_index = (current_suggestion_index + 1) % suggestions.length;
-			renderAiPrompt();
-		}
-		return;
-	}
-
-	// Handle left/right cursor arrow keys
-	if (str === '\x1b[D' || str === '\x1bOD') {
-		// Left Arrow
-		if (cursor_index > 0) {
-			cursor_index--;
-			renderAiPrompt();
-		}
-		return;
-	}
-	if (str === '\x1b[C' || str === '\x1bOC') {
-		// Right Arrow
-		if (cursor_index < ai_input.length) {
-			cursor_index++;
-			renderAiPrompt();
-		}
-		return;
-	}
-
-	if (str === '\x1b') {
-		// Escape
-		if (ai_input.length > 0) {
-			ai_input = '';
-			cursor_index = 0;
-			renderAiPrompt();
-		} else {
-			exitAiMode();
-		}
-		return;
-	}
-
-	const newline_idx = str.search(/[\r\n]/);
-	if (newline_idx !== -1) {
-		const prefix = str.slice(0, newline_idx);
-		const printable_prefix = prefix.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
-		if (printable_prefix.length > 0) {
-			ai_input = ai_input.slice(0, cursor_index) + printable_prefix + ai_input.slice(cursor_index);
-			cursor_index += printable_prefix.length;
-		}
-
-		if (is_suggesting && suggestions.length > 0 && current_suggestion_index >= 0) {
-			const selected_sug = suggestions[current_suggestion_index];
-			const selected_name = '/' + selected_sug.name;
-			if (ai_input !== selected_name) {
-				// Autocomplete the name
-				ai_input = selected_name;
-				cursor_index = ai_input.length;
-				current_suggestion_index = 0;
-				renderAiPrompt();
-				return;
-			}
-		}
-
-		// Execute exact matching slash commands
-		if (ai_input === '/clear') {
-			// Clear screen and move cursor to home (top-left)
-			process.stdout.write('\x1b[2J\x1b[H');
-
-			history_manager.clearCommandOutputs();
-			const history = history_manager.getColoredHistory();
-			if (history) {
-				process.stdout.write(history + '\n');
-			}
-
-			ai_input = '';
-			cursor_index = 0;
-			prev_rows = 1;
-			renderAiPrompt();
-			return;
-		}
-		if (ai_input === '/context') {
-			// Clear suggestions menu display
-			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
-
-			const history = history_manager.getCleanHistory();
-
-			process.stdout.write(`\n\x1b[35m--- [Nono Terminal & Chat Context] ---\n${history}\n--------------------------------------\x1b[0m\n`);
-
-			ai_input = '';
-			cursor_index = 0;
-			prev_rows = 1;
-			renderAiPrompt();
-			return;
-		}
-		if (ai_input === '/exit') {
-			// Clear suggestions menu display
-			process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
-			pty_process.kill();
-			process.exit(0);
-		}
-		if (ai_input === '/restart') {
-			ai_input = '';
-			cursor_index = 0;
-			reloadNono();
-			return;
-		}
-
-		// Normal AI prompt submit
-		if (ai_input.trim().length > 0) {
-			submitAiQuery();
-		}
-		return;
-	}
-
-	if (str === '\x7f' || str === '\x08') {
-		// Backspace at cursor position
-		if (cursor_index > 0) {
-			ai_input = ai_input.slice(0, cursor_index - 1) + ai_input.slice(cursor_index);
-			cursor_index--;
-			renderAiPrompt();
-		}
-		return;
-	}
-
-	if (str === '<' && ai_input.length === 0) {
-		loopModel();
-		return;
-	}
-
-	if (str.startsWith('\x1b')) {
-		// Ignore other escape sequences
-		return;
-	}
-
-	// Handle printable text / paste
-	const printable = str.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
-	if (printable.length > 0) {
-		ai_input = ai_input.slice(0, cursor_index) + printable + ai_input.slice(cursor_index);
-		cursor_index += printable.length;
-		renderAiPrompt();
-	}
-}
-
-function prepareForAiSubmission() {
-	if (!config || config.length === 0) return;
-	const model = config[current_model_index];
-	const P = `${model.title}> `.length;
-	const L = P + ai_input.length;
-	const W = process.stdout.columns || 80;
-	const new_rows = Math.floor(L / W) + 1;
-
-	// Render prompt leaves the cursor at target_row.
-	// Move the cursor back to top row of the prompt, then move to bottom row of prompt
-	const target_pos = P + cursor_index;
-	const target_row = Math.floor(target_pos / W);
-
-	if (target_row > 0) {
-		process.stdout.write(`\x1b[${target_row}A`);
-	}
-	process.stdout.write('\r');
-
-	const last_row = new_rows - 1;
-	if (last_row > 0) {
-		process.stdout.write(`\x1b[${last_row}B`);
-	}
-
-	// Clear any suggestions below it
-	process.stdout.write(`\x1b[s\n\x1b[J\x1b[u`);
-}
-
-async function submitAiQuery() {
-	prepareForAiSubmission();
-	process.stdout.write('\n');
-	state = state_ai_running;
-
-	const model_config = getEffectiveModel(config[current_model_index]);
-
-	// Append the user's query line to terminal history (replicates visual prompt on CLI)
-	history_manager.append(`\n\x1b[1;35m${model_config.title}>\x1b[0m ${ai_input}\n`, 'chat');
-
-	const current_messages = [
-		{
-			role: 'system',
-			content: `
-You are Nono, a fully autonomous AI coding agent running directly inside the user's terminal wrapper.
-Your goal is to help the user with any task they request, including coding, debugging, refactoring, and general system administration.
-You have full access to execute commands in the active terminal session using the run_command tool.
-
-Guidelines for autonomous execution:
-1. Act step-by-step. Break the user's request down into a logical plan.
-2. You can inspect files and directories (using ls, cat, grep, find, etc.).
-3. You can create, edit, or append to files using standard shell tools (e.g. cat << 'EOF' > filename, sed, echo, etc.).
-4. Run tests, compilers, or linter commands (e.g. npm test, cargo check, python test.py) to verify your changes.
-5. If a command fails or produces errors, analyze the output, correct the code/commands, and run them again. Iterate autonomously until the task is successfully accomplished.
-6. Do not explain every little step to the user in intermediate text responses; prefer to execute commands to get the job done.
-7. Once the task is fully completed and verified, summarize what was done and provide a concise final report.`
-		},
-		{
-			role: 'user',
-			content: `Here is the current terminal session history, showing both terminal commands and our AI conversation in chronological order:
----
-${history_manager.getCleanHistory()}
----
-Please continue the task or respond to the user.`
-		}
-	];
-
-	const tools = [
-		{
-			type: 'function',
-			function: {
-				name: 'run_command',
-				description: 'Execute a shell command in the terminal and return its stdout/stderr output.',
-				parameters: {
-					type: 'object',
-					properties: {
-						command: {
-							type: 'string',
-							description: 'The shell command to execute.'
-						}
-					},
-					required: ['command']
-				}
-			}
-		},
-		{
-			type: 'function',
-			function: {
-				name: 'read_file',
-				description: 'Read the contents of a file. Optionally specify start_line and end_line (1-indexed, inclusive) to read a specific range.',
-				parameters: {
-					type: 'object',
-					properties: {
-						path: {
-							type: 'string',
-							description: 'The relative or absolute path of the file to read.'
-						},
-						start_line: {
-							type: 'integer',
-							description: 'The 1-indexed start line number (inclusive).'
-						},
-						end_line: {
-							type: 'integer',
-							description: 'The 1-indexed end line number (inclusive).'
-						}
-					},
-					required: ['path']
-				}
-			}
-		},
-		{
-			type: 'function',
-			function: {
-				name: 'edit_file',
-				description: 'Create, overwrite, or edit a file. For edits, specify the target substring block to replace and the replacement. For creating or overwriting, specify content.',
-				parameters: {
-					type: 'object',
-					properties: {
-						path: {
-							type: 'string',
-							description: 'The relative or absolute path of the file to write or edit.'
-						},
-						content: {
-							type: 'string',
-							description: 'The full file content. Use this to create or completely overwrite a file.'
-						},
-						target: {
-							type: 'string',
-							description: 'The exact substring block in the file to replace.'
-						},
-						replacement: {
-							type: 'string',
-							description: 'The new substring block to replace the target with.'
-						}
-					},
-					required: ['path']
-				}
-			}
-		}
-	];
-
-	let has_executed_command = false;
+	// Scale volume using the configured volume scale factor
+	tones.forEach(t => t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale);
 
 	try {
-		while (state === state_ai_running) {
-			process.stdout.write('\x1b[2mNono is thinking...\x1b[0m\r');
+		const wav_buffer = generateChimeWav(tones);
+		const temp_path = path.join(os.tmpdir(), `nono-chime-${type}.wav`);
+		fs.writeFileSync(temp_path, wav_buffer);
 
-			current_abort_controller = new AbortController();
+		const player = fs.existsSync('/usr/bin/pw-play') 
+			? 'pw-play' 
+			: (fs.existsSync('/usr/bin/paplay') ? 'paplay' : (fs.existsSync('/usr/bin/aplay') ? 'aplay' : null));
 
-			// Debug log outgoing payload
-			fs.appendFileSync('nono-debug.log', `\n=== CALL ===\n${JSON.stringify(current_messages, null, 2)}\n`);
-
-			const response = await callModel(model_config, current_messages, tools, { signal: current_abort_controller.signal });
-
-			// Clear current_abort_controller
-			current_abort_controller = null;
-
-			// Debug log response
-			fs.appendFileSync('nono-debug.log', `=== RESPONSE ===\n${JSON.stringify(response, null, 2)}\n`);
-
-			// Clear the "thinking..." indicator
-			process.stdout.write('\r\x1b[K');
-
-			if (response.thinking) {
-				const W = process.stdout.columns || 80;
-				const lines = response.thinking.split('\n');
-				let total_rows = 0;
-				for (const line of lines) {
-					total_rows += Math.floor(line.length / W) + 1;
-					process.stdout.write(`\x1b[90m${line}\x1b[0m\n`);
-					await new Promise(r => setTimeout(r, 45)); // organic typing delay
-				}
-				await new Promise(r => setTimeout(r, 1200)); // allow reading
-				if (total_rows > 0) {
-					process.stdout.write(`\x1b[${total_rows}A\r\x1b[J`);
-				}
-			}
-
-			// Append assistant's turn
-			current_messages.push(response);
-
-			if (response.tool_calls && response.tool_calls.length > 0) {
-				// Execute tool call(s)
-				const tool_call = response.tool_calls[0]; // Process first tool call
-				if (tool_call.function.name === 'run_command') {
-					const args = JSON.parse(tool_call.function.arguments);
-					const cmd = args.command;
-
-					// Print grey sparkle prefix (without a newline) so the PTY command echo appends to it
-					process.stdout.write(`\x1b[90m✦\x1b[0m `);
-					has_executed_command = true;
-
-					// Execute command in PTY
-					const output = await executeCommandInPty(cmd);
-					state = state_ai_running;
-
-					// Append tool result
-					const tool_result = {
-						role: 'tool',
-						tool_call_id: tool_call.id,
-						name: 'run_command',
-						content: output
-					};
-					current_messages.push(tool_result);
-				} else if (tool_call.function.name === 'read_file') {
-					const args = JSON.parse(tool_call.function.arguments);
-					const file_path = args.path;
-					const start_line = args.start_line;
-					const end_line = args.end_line;
-
-					const filename = path.basename(file_path);
-					let action_str = `Reading ${filename}`;
-					if (start_line !== undefined && end_line !== undefined) {
-						action_str += ` (${start_line}-${end_line})`;
-					} else if (start_line !== undefined) {
-						action_str += ` (${start_line}-)`;
-					} else if (end_line !== undefined) {
-						action_str += ` (1-${end_line})`;
-					}
-
-					// Print action line in terminal
-					process.stdout.write(`\x1b[90m✦\x1b[0m ${action_str}\n`);
-					history_manager.append(`\x1b[90m✦\x1b[0m ${action_str}\n`, 'command');
-
-					// Perform the file read
-					let output = '';
-					try {
-						const absolute_path = path.resolve(process.cwd(), file_path);
-						const file_content = fs.readFileSync(absolute_path, 'utf8');
-						if (start_line !== undefined || end_line !== undefined) {
-							const lines = file_content.split(/\r?\n/);
-							const start = start_line !== undefined ? Math.max(1, start_line) - 1 : 0;
-							const end = end_line !== undefined ? Math.min(lines.length, end_line) : lines.length;
-							output = lines.slice(start, end).join('\n');
-						} else {
-							output = file_content;
-						}
-					} catch (err) {
-						output = `Error reading file: ${err.message}`;
-					}
-
-					// Append tool result
-					const tool_result = {
-						role: 'tool',
-						tool_call_id: tool_call.id,
-						name: 'read_file',
-						content: output
-					};
-					current_messages.push(tool_result);
-				} else if (tool_call.function.name === 'edit_file') {
-					const args = JSON.parse(tool_call.function.arguments);
-					const file_path = args.path;
-					const content = args.content;
-					const target = args.target;
-					const replacement = args.replacement;
-
-					const filename = path.basename(file_path);
-					let output = '';
-					let removed_lines = 0;
-					let added_lines = 0;
-
-					try {
-						const absolute_path = path.resolve(process.cwd(), file_path);
-						const file_exists = fs.existsSync(absolute_path);
-
-						if (target !== undefined && replacement !== undefined) {
-							if (!file_exists) {
-								throw new Error(`File does not exist for target replacement: ${file_path}`);
-							}
-							const existing_content = fs.readFileSync(absolute_path, 'utf8');
-							if (!existing_content.includes(target)) {
-								throw new Error(`Target content not found in file.`);
-							}
-							// Check if target appears multiple times
-							const occurrences = existing_content.split(target).length - 1;
-							if (occurrences > 1) {
-								throw new Error(`Target content is ambiguous (found ${occurrences} occurrences).`);
-							}
-
-							removed_lines = target.split(/\r?\n/).length;
-							added_lines = replacement.split(/\r?\n/).length;
-
-							const new_content = existing_content.replace(target, replacement);
-							fs.writeFileSync(absolute_path, new_content, 'utf8');
-							output = `Successfully edited file: ${file_path}`;
-						} else if (content !== undefined) {
-							let existing_lines = 0;
-							if (file_exists) {
-								const existing_content = fs.readFileSync(absolute_path, 'utf8');
-								existing_lines = existing_content.split(/\r?\n/).length;
-							}
-							removed_lines = existing_lines;
-							added_lines = content.split(/\r?\n/).length;
-
-							// Create parent directories if they don't exist
-							const parent_dir = path.dirname(absolute_path);
-							if (!fs.existsSync(parent_dir)) {
-								fs.mkdirSync(parent_dir, { recursive: true });
-							}
-
-							fs.writeFileSync(absolute_path, content, 'utf8');
-							output = `Successfully wrote file: ${file_path}`;
-						} else {
-							throw new Error('Either content or both target and replacement must be provided.');
-						}
-					} catch (err) {
-						output = `Error writing file: ${err.message}`;
-					}
-
-					let action_str = `Editing ${filename}`;
-					if (removed_lines > 0 || added_lines > 0) {
-						action_str += ` -${removed_lines} +${added_lines}`;
-					}
-
-					// Print action line in terminal
-					process.stdout.write(`\x1b[90m✦\x1b[0m ${action_str}\n`);
-					history_manager.append(`\x1b[90m✦\x1b[0m ${action_str}\n`, 'command');
-
-					// Append tool result
-					const tool_result = {
-						role: 'tool',
-						tool_call_id: tool_call.id,
-						name: 'edit_file',
-						content: output
-					};
-					current_messages.push(tool_result);
-				} else {
-					// Unsupported tool
-					const error_result = {
-						role: 'tool',
-						tool_call_id: tool_call.id,
-						name: tool_call.function.name,
-						content: `Error: Unsupported tool ${tool_call.function.name}`
-					};
-					current_messages.push(error_result);
-				}
-			} else {
-				// No tool calls, AI is finished
-				if (response.content) {
-					// Append Nono's response to terminal history
-					history_manager.append(`\x1b[35m✦\x1b[0m ${response.content}\n`, 'chat');
-					// Print response in a distinct style (purple ✦ followed by response)
-					process.stdout.write(`\x1b[35m✦\x1b[0m ${response.content}\n`);
-				}
-				break;
-			}
+		if (player) {
+			spawn(player, [temp_path], { stdio: 'ignore', detached: true }).unref();
 		}
-	} catch (error) {
-		current_abort_controller = null;
-		if (error.name === 'AbortError' || error.message.includes('aborted') || error.message.includes('cancel')) {
-			process.stdout.write(`\r\x1b[K\x1b[90m[Request cancelled]\x1b[0m\n`);
-		} else {
-			process.stdout.write(`\r\x1b[K\x1b[31mError: ${error.message}\x1b[0m\n`);
-		}
+	} catch (err) {
+		// Ignore audio errors
 	}
-
-	// Stay in AI mode
-	state = state_ai_input;
-	ai_input = '';
-	cursor_index = 0;
-	prev_rows = 1;
-	renderAiPrompt();
 }
 
-function executeCommandInPty(cmd) {
+// Helper to ask the user a question / confirmation
+function askUser(question) {
+	clearProgress();
+	playChime('question');
 	return new Promise(resolve => {
-		state = state_ai_command;
-		command_output_buffer = '';
-
-		// Prepend the sparkle prefix to the history manager so it's recorded chronologically before the command echo
-		history_manager.append('\x1b[90m✦\x1b[0m ', 'command');
-
-		// Write command to PTY
-		pty_process.write(cmd + '\r');
-
-		last_pty_data_time = Date.now();
-
-		command_check_interval = setInterval(() => {
-			if (isShellInForeground()) {
-				const idle_time = Date.now() - last_pty_data_time;
-				if (idle_time >= 75) {
-					// Ensure shell has finished printing prompt
-					clearInterval(command_check_interval);
-
-					// Clear prompt line from terminal screen
-					process.stdout.write('\r\x1b[K');
-
-					// Clean command output buffer
-					const clean_output = getCleanCommandOutput(command_output_buffer, cmd, last_pty_line);
-					resolve(clean_output);
-				}
-			}
-		}, 50);
+		const rl = readline.createInterface({
+			input: process.stdin,
+			output: process.stdout
+		});
+		rl.question(question, answer => {
+			rl.close();
+			resolve(answer);
+		});
 	});
 }
 
-function getCleanCommandOutput(buffer, command, prompt) {
-	// Strip ANSI escape codes
-	const clean_buffer = stripAnsi(buffer);
-	const clean_prompt = stripAnsi(prompt);
+function askUserInRoll(question) {
+	playChime('question');
+	updateProgress(question);
 
-	const lines = clean_buffer.split(/\r?\n/);
-
-	// Remove the echoed command at the start
-	if (lines.length > 0) {
-		lines.shift();
-	}
-
-	let output = lines.join('\n');
-
-	// Remove trailing prompt
-	if (clean_prompt && output.endsWith(clean_prompt)) {
-		output = output.substring(0, output.length - clean_prompt.length);
-	}
-
-	return output.trim();
+	return new Promise((resolve) => {
+		const rl = readline.createInterface({
+			input: process.stdin,
+			output: process.stdout,
+			terminal: true
+		});
+		rl.on('line', (line) => {
+			rl.close();
+			resolve(line);
+		});
+	});
 }
+
+// Helper to run sudo true interactively and capture stdout/stderr in the roll
+function runInteractiveSudo() {
+	return new Promise((resolve, reject) => {
+		const child = spawn('sudo', ['true'], { stdio: ['inherit', 'pipe', 'pipe'] });
+
+		child.stdout.on('data', (data) => {
+			const text = data.toString().trim();
+			if (text) {
+				updateProgress(`• ${text}`);
+			}
+		});
+
+		child.stderr.on('data', (data) => {
+			const text = data.toString().trim();
+			if (text) {
+				updateProgress(`• ${text}`);
+			}
+		});
+
+		child.on('close', (code) => {
+			if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(`Sudo authentication failed.`));
+			}
+		});
+	});
+}
+
+// Find project root
+function findProjectRoot(start_dir = process.cwd()) {
+	const root_indicators = ['.git', 'package.json', 'cargo.toml', 'go.mod', 'requirements.txt', 'pyproject.toml', 'Notes.md'];
+	let current_dir = start_dir;
+	while (true) {
+		for (const indicator of root_indicators) {
+			if (fs.existsSync(path.join(current_dir, indicator))) {
+				return current_dir;
+			}
+		}
+		const parent_dir = path.dirname(current_dir);
+		if (parent_dir === current_dir) {
+			break;
+		}
+		current_dir = parent_dir;
+	}
+	return null;
+}
+
+// Get kitty screen text
+function getKittyScreenText() {
+	try {
+		const output = execSync('kitty @ get-text', {
+			timeout: 500,
+			encoding: 'utf-8',
+			stdio: ['ignore', 'pipe', 'ignore']
+		});
+		if (output) {
+			const lines = output.split('\n');
+			return lines.slice(-100).join('\n');
+		}
+	} catch (err) {
+		// Ignore error (e.g. remote control disabled, or not in kitty)
+	}
+	return null;
+}
+
+// Run project dry-run command if possible
+function runProjectDryRun(modified_file_path) {
+	const project_root = findProjectRoot(path.dirname(modified_file_path));
+	if (!project_root) {
+		return null;
+	}
+
+	// Node project
+	const pkg_json_path = path.join(project_root, 'package.json');
+	if (fs.existsSync(pkg_json_path)) {
+		try {
+			const pkg = JSON.parse(fs.readFileSync(pkg_json_path, 'utf8'));
+			let command = null;
+			if (pkg.scripts) {
+				if (pkg.scripts.lint) {
+					command = 'npm run lint';
+				} else if (pkg.scripts.test) {
+					command = 'npm test';
+				} else if (pkg.scripts.build) {
+					command = 'npm run build';
+				}
+			}
+
+			const tsconfig_path = path.join(project_root, 'tsconfig.json');
+			if (!command && fs.existsSync(tsconfig_path)) {
+				command = 'npx tsc --noEmit';
+			}
+
+			if (command) {
+				updateProgress(`• Running dry-run validation: ${command}`);
+				writeDetails(`[Dry-Run] Executing "${command}" in ${project_root}...`);
+				try {
+					const stdout = execSync(command, {
+						cwd: project_root,
+						encoding: 'utf-8',
+						stdio: ['ignore', 'pipe', 'pipe']
+					});
+					writeDetails(`[Dry-Run] Success:\n${stdout}`);
+					updateProgress(`• Dry-run validation passed`);
+					return {
+						dry_run: {
+							command,
+							status: 'passed',
+							output: stdout.trim()
+						}
+					};
+				} catch (err) {
+					const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
+					writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
+					updateProgress(`• Dry-run validation failed`);
+					playChime('error');
+					return {
+						dry_run: {
+							command,
+							status: 'failed',
+							error: error_msg.trim()
+						}
+					};
+				}
+			}
+		} catch (e) {
+			writeDetails(`[Dry-Run] Error parsing package.json: ${e.message}`);
+		}
+	}
+
+	// Rust / Cargo project
+	const cargo_toml_path = path.join(project_root, 'Cargo.toml');
+	if (fs.existsSync(cargo_toml_path)) {
+		const command = 'cargo check';
+		updateProgress(`• Running dry-run validation: ${command}`);
+		writeDetails(`[Dry-Run] Executing "${command}" in ${project_root}...`);
+		try {
+			const stdout = execSync(command, {
+				cwd: project_root,
+				encoding: 'utf-8',
+				stdio: ['ignore', 'pipe', 'pipe']
+			});
+			writeDetails(`[Dry-Run] Success:\n${stdout}`);
+			updateProgress(`• Dry-run validation passed`);
+			return {
+				dry_run: {
+					command,
+					status: 'passed',
+					output: stdout.trim()
+				}
+			};
+		} catch (err) {
+			const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
+			writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
+			updateProgress(`• Dry-run validation failed`);
+			playChime('error');
+			return {
+				dry_run: {
+					command,
+					status: 'failed',
+					error: error_msg.trim()
+				}
+			};
+		}
+	}
+
+	return null;
+}
+
+// Check if a command is high-impact
+function isHighImpactCommand(command) {
+	const normalized = command.toLowerCase();
+
+	if (normalized.includes('sudo')) return true;
+	if (normalized.includes('pacman') || normalized.includes('yay') || normalized.includes('paru')) return true;
+
+	if (normalized.includes('systemctl') && (normalized.includes('start') || normalized.includes('stop') || normalized.includes('restart') || normalized.includes('enable') || normalized.includes('disable'))) {
+		return true;
+	}
+
+	if (normalized.includes('/etc/') || normalized.includes('/sys/') || normalized.includes('/boot/') || normalized.includes('/usr/lib/systemd')) {
+		const is_write = />|>>|tee|rm\s|mv\s|cp\s|chmod|chown|edit|mkdir|touch/g.test(command);
+		if (is_write) return true;
+	}
+
+	return false;
+}
+
+// ----------------------------------------------------
+// Tool Implementations
+// ----------------------------------------------------
+
+function listDirectoryStructure({ directory_path, depth = 2 }) {
+	const abs_path = path.resolve(directory_path);
+
+	function recurse(dir, current_depth = 1) {
+		if (!fs.existsSync(dir)) {
+			throw new Error(`Directory does not exist: ${dir}`);
+		}
+		const stat = fs.statSync(dir);
+		if (!stat.isDirectory()) {
+			throw new Error(`Path is not a directory: ${dir}`);
+		}
+
+		const items = fs.readdirSync(dir);
+		const result = [];
+
+		for (const item of items) {
+			if (item === '.git' || item === 'node_modules' || item === '.cache') {
+				continue;
+			}
+			const item_path = path.join(dir, item);
+			const item_stat = fs.statSync(item_path);
+			const is_dir = item_stat.isDirectory();
+
+			const entry = {
+				name: item,
+				path: path.relative(process.cwd(), item_path),
+				type: is_dir ? 'directory' : 'file'
+			};
+
+			if (is_dir && current_depth < depth) {
+				try {
+					entry.children = recurse(item_path, current_depth + 1);
+				} catch (e) {
+					entry.error = e.message;
+				}
+			}
+			result.push(entry);
+		}
+		return result;
+	}
+
+	return { files: recurse(abs_path, 1) };
+}
+
+function viewFileContents({ file_path, start_line, end_line }) {
+	const abs_path = path.resolve(file_path);
+	if (!fs.existsSync(abs_path)) {
+		throw new Error(`File does not exist: ${file_path}`);
+	}
+	const stat = fs.statSync(abs_path);
+	if (!stat.isFile()) {
+		throw new Error(`Path is not a file: ${file_path}`);
+	}
+
+	const content = fs.readFileSync(abs_path, 'utf8');
+	const lines = content.split(/\r?\n/);
+
+	const start = start_line ? Math.max(1, start_line) : 1;
+	const end = end_line ? Math.min(lines.length, end_line) : lines.length;
+
+	const sliced_lines = lines.slice(start - 1, end);
+	return {
+		file_path,
+		total_lines: lines.length,
+		start_line: start,
+		end_line: end,
+		content: sliced_lines.join('\n')
+	};
+}
+
+// Helper to format supported text files using Prettier
+function formatWithPrettier(file_path) {
+	const ext = path.extname(file_path).toLowerCase();
+	const formatable_exts = ['.js', '.jsx', '.ts', '.tsx', '.json', '.css', '.scss', '.html', '.md', '.markdown', '.yaml', '.yml'];
+	if (formatable_exts.includes(ext)) {
+		try {
+			execSync(`npx -y prettier --write ${JSON.stringify(file_path)}`, { stdio: 'ignore' });
+		} catch (err) {
+			// Ignore formatter errors (e.g. syntax errors or missing prettier)
+		}
+	}
+}
+
+// Helper to compute added and removed lines count between two file states (using LCS)
+function getLineDiff(oldStr, newStr) {
+	if (!oldStr) {
+		const added = newStr ? newStr.split(/\r?\n/).length : 0;
+		return { deleted: 0, added };
+	}
+	const oldLines = oldStr.split(/\r?\n/);
+	const newLines = newStr ? newStr.split(/\r?\n/) : [];
+	const m = oldLines.length;
+	const n = newLines.length;
+
+	// Cap to avoid high memory/CPU on massive files
+	if (m > 1000 || n > 1000) {
+		return { deleted: m, added: n };
+	}
+
+	const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+	for (let i = 1; i <= m; i++) {
+		for (let j = 1; j <= n; j++) {
+			if (oldLines[i - 1] === newLines[j - 1]) {
+				dp[i][j] = dp[i - 1][j - 1] + 1;
+			} else {
+				dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+			}
+		}
+	}
+	const lcs = dp[m][n];
+	return { deleted: m - lcs, added: n - lcs };
+}
+
+function writeFile({ file_path, content }) {
+	const abs_path = path.resolve(file_path);
+	const dir = path.dirname(abs_path);
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+	const old_content = fs.existsSync(abs_path) ? fs.readFileSync(abs_path, 'utf8') : '';
+	fs.writeFileSync(abs_path, content, 'utf8');
+
+	formatWithPrettier(abs_path);
+
+	const final_content = fs.readFileSync(abs_path, 'utf8');
+	const { deleted, added } = getLineDiff(old_content, final_content);
+	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+
+	const lint_result = runProjectDryRun(abs_path);
+	return {
+		file_path,
+		status: 'success',
+		...lint_result
+	};
+}
+
+function patchFile({ file_path, search_block, replace_block }) {
+	const abs_path = path.resolve(file_path);
+	if (!fs.existsSync(abs_path)) {
+		throw new Error(`File does not exist: ${file_path}`);
+	}
+	const old_content = fs.readFileSync(abs_path, 'utf8');
+
+	const normalized_content = old_content.replace(/\r\n/g, '\n');
+	const normalized_search = search_block.replace(/\r\n/g, '\n');
+	const normalized_replace = replace_block.replace(/\r\n/g, '\n');
+
+	const index = normalized_content.indexOf(normalized_search);
+	if (index === -1) {
+		throw new Error(`Search block not found in file: ${file_path}`);
+	}
+
+	const last_index = normalized_content.lastIndexOf(normalized_search);
+	if (index !== last_index) {
+		throw new Error(`Search block is not unique. It appears multiple times in file: ${file_path}`);
+	}
+
+	const patched_content = normalized_content.slice(0, index) + normalized_replace + normalized_content.slice(index + normalized_search.length);
+	fs.writeFileSync(abs_path, patched_content, 'utf8');
+
+	formatWithPrettier(abs_path);
+
+	const final_content = fs.readFileSync(abs_path, 'utf8');
+	const { deleted, added } = getLineDiff(old_content, final_content);
+	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+
+	const lint_result = runProjectDryRun(abs_path);
+	return {
+		file_path,
+		status: 'success',
+		...lint_result
+	};
+}
+
+function searchGrep({ pattern, directory_path }) {
+	return new Promise(resolve => {
+		const search_dir = directory_path ? path.resolve(directory_path) : process.cwd();
+		const cmd = `/usr/bin/rg -n --no-heading --color=never --max-count=100 ${JSON.stringify(pattern)} ${JSON.stringify(search_dir)}`;
+
+		exec(cmd, { timeout: 10000 }, (error, stdout, stderr) => {
+			if (error && error.code !== 1) {
+				// 1 means no matches
+				resolve({
+					status: 'error',
+					error: stderr || error.message
+				});
+			} else {
+				resolve({
+					status: 'success',
+					matches: stdout.trim() || 'No matches found.'
+				});
+			}
+		});
+	});
+}
+
+async function executeSystemCommand({ command, timeout_ms = 30000 }) {
+	if (isHighImpactCommand(command)) {
+		updateProgress(`• High-impact action detected: "${command}"`);
+		const answer = await askUserInRoll(`Do you want to run this command? [Y/n]: `);
+		const norm = answer.trim().toLowerCase();
+		if (norm !== '' && norm !== 'y' && norm !== 'yes') {
+			return {
+				status: 'error',
+				error: 'Execution cancelled by the user.'
+			};
+		}
+	}
+
+	// Pre-authenticate sudo if command uses sudo and credentials are not cached
+	if (command.includes('sudo')) {
+		try {
+			execSync('sudo -n true', { stdio: 'ignore' });
+		} catch (e) {
+			updateProgress(`• sudo credential caching required. Please authenticate when prompted:`);
+			playChime('fingerprint');
+			try {
+				await runInteractiveSudo();
+			} catch (err) {
+				return {
+					status: 'error',
+					error: 'Sudo authentication failed.'
+				};
+			}
+		}
+	}
+
+	return new Promise(resolve => {
+		exec(command, { timeout: timeout_ms }, (error, stdout, stderr) => {
+			resolve({
+				stdout: stdout,
+				stderr: stderr,
+				exit_code: error ? error.code || 1 : 0
+			});
+		});
+	});
+}
+
+function proposeTerminalInput({ command_to_inject }) {
+	return new Promise(resolve => {
+		const window_id = process.env.KITTY_WINDOW_ID;
+		const match_arg = window_id ? `--match id:${window_id}` : '';
+		const cmd = `kitty @ send-text ${match_arg} ${JSON.stringify(command_to_inject)}`;
+
+		exec(cmd, (error, stdout, stderr) => {
+			if (error) {
+				resolve({
+					status: 'error',
+					error: stderr || error.message
+				});
+			} else {
+				resolve({
+					status: 'success',
+					message: `Injected command into terminal prompt: "${command_to_inject}"`
+				});
+			}
+		});
+	});
+}
+
+// Map tool name to implementation function
+const tools_mapping = {
+	list_directory_structure: listDirectoryStructure,
+	view_file_contents: viewFileContents,
+	write_file: writeFile,
+	patch_file: patchFile,
+	search_grep: searchGrep,
+	execute_system_command: executeSystemCommand,
+	propose_terminal_input: proposeTerminalInput
+};
+
+// Helper to get OS description dynamically
+function getOSDescription() {
+	try {
+		if (process.platform === 'linux') {
+			if (fs.existsSync('/etc/os-release')) {
+				const release = fs.readFileSync('/etc/os-release', 'utf8');
+				const name_match = /^PRETTY_NAME="([^"]+)"/m.exec(release) || /^NAME="([^"]+)"/m.exec(release);
+				if (name_match) {
+					return name_match[1];
+				}
+			}
+			return 'Linux';
+		}
+		if (process.platform === 'darwin') {
+			return 'macOS';
+		}
+		if (process.platform === 'win32') {
+			return 'Windows';
+		}
+		return `${os.type()} ${os.release()}`;
+	} catch (e) {
+		return 'Linux';
+	}
+}
+
+const os_name = getOSDescription();
+
+// ----------------------------------------------------
+// Gemini Tool Declarations
+// ----------------------------------------------------
+
+const tools_declarations = [
+	{
+		name: 'list_directory_structure',
+		description: 'Lists the files and folders in a directory recursively up to a certain depth to understand the project workspace layout.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				directory_path: { type: 'STRING', description: 'The absolute or relative path to the directory.' },
+				depth: { type: 'INTEGER', description: 'Maximum depth of recursion (default: 2).' }
+			},
+			required: ['directory_path']
+		}
+	},
+	{
+		name: 'view_file_contents',
+		description: 'Reads the exact content of a file. Supports line-range targeting for processing large source files safely.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				file_path: { type: 'STRING', description: 'The path to the file.' },
+				start_line: { type: 'INTEGER', description: 'Optional line number to start reading from.' },
+				end_line: { type: 'INTEGER', description: 'Optional line number to stop reading at.' }
+			},
+			required: ['file_path']
+		}
+	},
+	{
+		name: 'write_file',
+		description: 'Creates a new file or overwrites an existing file with complete fresh content.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				file_path: { type: 'STRING', description: 'Path where the file should be created/written.' },
+				content: { type: 'STRING', description: 'The exact textual content to write.' }
+			},
+			required: ['file_path', 'content']
+		}
+	},
+	{
+		name: 'patch_file',
+		description: 'Applies a specific diff, line replacement, or block modification to a file to minimize rewriting huge files.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				file_path: { type: 'STRING', description: 'Path to the target file.' },
+				search_block: { type: 'STRING', description: 'The original code block to find.' },
+				replace_block: { type: 'STRING', description: 'The new code block to substitute.' }
+			},
+			required: ['file_path', 'search_block', 'replace_block']
+		}
+	},
+	{
+		name: 'search_grep',
+		description: 'Performs a fast regex-based substring search across the workspace (equivalent to ripgrep) to find references or declarations.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				pattern: { type: 'STRING', description: 'The regex pattern or substring to search for.' },
+				directory_path: { type: 'STRING', description: 'The directory root to search inside.' }
+			},
+			required: ['pattern']
+		}
+	},
+	{
+		name: 'execute_system_command',
+		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code.`,
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				command: { type: 'STRING', description: "The exact terminal command to run (e.g. 'nmcli dev wifi list', 'cargo build')." },
+				timeout_ms: { type: 'INTEGER', description: 'Maximum execution time in milliseconds (default: 30000).' }
+			},
+			required: ['command']
+		}
+	},
+	{
+		name: 'propose_terminal_input',
+		description: "Injects text straight into the user's active Zsh prompt using Kitty's remote control feature, leaving the user to hit Enter.",
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				command_to_inject: { type: 'STRING', description: 'The command string to stage on the user shell line.' }
+			},
+			required: ['command_to_inject']
+		}
+	}
+];
+
+const system_prompt = `You are Nono, an ultra-efficient CLI AI Agent & Coding Workspace Specialist.
+You run on a ${os_name} host and operate in one of two modes:
+1. System Admin Mode: Focused on minimal, precise system calls (NetworkManager, systemctl, diagnostics).
+2. Workspace Developer Mode: Focused on codebase understanding, editing, and software engineering.
+
+CRITICAL INSTRUCTIONS:
+- You operate using an Agentic Loop (ReAct: Reason + Act). Before invoking any tool, you MUST output your plan and reasoning.
+- Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy.
+- Deterministic Patching: Prefer patch_file over complete rewrites for existing files to conserve tokens and reduce errors.
+- Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
+- If you need to search for code or references, use search_grep.
+- If you need up-to-date web information, use the googleSearch tool.
+
+Guidelines:
+- Keep your final output concise and accurate.
+- Maintain documentation integrity.
+`;
+
+// ----------------------------------------------------
+// Main Agentic Loop Orchestrator
+// ----------------------------------------------------
+
+async function main() {
+	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
+	if (!fs.existsSync(cache_dir)) {
+		fs.mkdirSync(cache_dir, { recursive: true });
+	}
+
+	// Handle nono --details argument
+	if (process.argv[2] === '--details') {
+		const details_file = path.join(cache_dir, `details-${process.ppid}.log`);
+		if (fs.existsSync(details_file)) {
+			console.log(`Opening session details in VS Code...`);
+			exec(`code ${JSON.stringify(details_file)}`, error => {
+				if (error) {
+					console.error(`Failed to open VS Code: ${error.message}`);
+					process.exit(1);
+				}
+				process.exit(0);
+			});
+			return;
+		} else {
+			console.error(`No details log found for this terminal session.`);
+			process.exit(1);
+		}
+	}
+
+	// Handle nono --test-audio argument
+	if (process.argv[2] === '--test-audio') {
+		const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+		
+		console.log(`\n\x1b[35m=== Nono Audio Diagnostics ===\x1b[0m`);
+		console.log(`Current Volume Level: ${Math.round(volume_scale * 100)}%\n`);
+
+		console.log(`• Playing: User Interaction Needed Chime`);
+		console.log(`  \x1b[90mMeaning: Played when Nono asks a question or requires sudo credential authentication.\x1b[0m`);
+		playChime('user_interaction_needed');
+		await sleep(1500);
+
+		console.log(`• Playing: Success Chime`);
+		console.log(`  \x1b[90mMeaning: Played at the end of a task when Nono finishes successfully.\x1b[0m`);
+		playChime('complete');
+		await sleep(1500);
+
+		console.log(`• Playing: Error Chime`);
+		console.log(`  \x1b[90mMeaning: Played when a task fails or a dry-run check throws errors.\x1b[0m`);
+		playChime('error');
+		await sleep(1500);
+
+		console.log(`\n\x1b[32m✔ Audio diagnostics complete!\x1b[0m\n`);
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --test-format argument
+	if (process.argv[2] === '--test-format') {
+		const test_markdown = `### System Status & Sudo Verification
+Here is the diagnostics output from the elevated test environment:
+
+- **Command executed**: \`sudo systemctl status fprintd\`
+- **Status**: \`active (running)\`
+- **Elapsed execution time**: 4s
+
+### Security & Access Policy
+1. **Passwordless Access**: Active.
+2. **Elevated Privileges**: Fully verified.
+
+Here is the raw system logs payload:
+\`\`\`text
+Jun 29 00:34:40 host systemd[1]: Starting Fingerprint Authentication Daemon...
+Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
+\`\`\`
+
+*Note: Please ensure the PAM module rules are kept aligned with the security constraints.*`;
+
+		console.log(`\n\x1b[35m=== Nono Markdown Formatting Test ===\x1b[0m\n`);
+		console.log(`\x1b[35m✦\x1b[0m ${formatMarkdownForTerminal(test_markdown)}`);
+		console.log();
+		process.exit(0);
+		return;
+	}
+
+	// Capture CLI arguments
+	let user_query = process.argv.slice(2).join(' ');
+
+	// If no arguments, prompt interactively
+	if (!user_query.trim()) {
+		console.log('\x1b[32mNono Workspace Specialist\x1b[0m');
+		user_query = await askUser('How can I help you today? ');
+		if (!user_query.trim()) {
+			console.log('No prompt provided. Exiting.');
+			process.exit(0);
+		}
+	}
+
+	// Reset the elapsed timer to exclude prompt typing time
+	start_time = Date.now();
+
+	// Create/Clear details file for this command run
+	details_path = path.join(cache_dir, `details-${process.ppid}.log`);
+	fs.writeFileSync(details_path, '', 'utf8');
+
+	// Load or initialize session
+	const session_path = path.join(cache_dir, `session-${process.ppid}.json`);
+	let history = [];
+	if (fs.existsSync(session_path)) {
+		try {
+			history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+		} catch (e) {
+			// Clear corrupt file
+		}
+	}
+
+	// Ingest environmental context
+	const project_root = findProjectRoot();
+	const screen_text = getKittyScreenText();
+
+	let context_bonus = '';
+	if (screen_text) {
+		context_bonus += `\n\n[Live Terminal Buffer (last 100 lines)]:\n${screen_text}`;
+	}
+	if (project_root) {
+		context_bonus += `\n\n[Workspace Developer Mode active. Project root: ${project_root}]`;
+		try {
+			const root_structure = listDirectoryStructure({ directory_path: project_root, depth: 1 });
+			context_bonus += `\n[Project Root Directory Structure (depth 1)]:\n${JSON.stringify(root_structure, null, 2)}`;
+		} catch (e) {
+			// Ignore directory structure listing error
+		}
+	} else {
+		context_bonus += `\n\n[System Admin Mode active]`;
+	}
+
+	// Add the new user query to the history
+	const full_user_prompt = `${user_query}${context_bonus}`;
+	history.push({
+		role: 'user',
+		parts: [{ text: full_user_prompt }]
+	});
+
+	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
+
+	updateProgress('• Thinking...');
+
+	// Start the ReAct execution loop
+	while (true) {
+		try {
+			const response = await ai.models.generateContent({
+				model: model_name,
+				contents: history,
+				config: {
+					systemInstruction: system_prompt,
+					tools: [{ functionDeclarations: tools_declarations }, { googleSearch: {} }],
+					toolConfig: {
+						functionCallingConfig: {
+							mode: 'AUTO'
+						},
+						includeServerSideToolInvocations: true
+					}
+				}
+			});
+
+			const candidate = response.candidates?.[0];
+			const model_message = candidate?.content;
+			if (!model_message) {
+				finishProgressError('No response received from model.');
+				break;
+			}
+
+			// Add model's turn to history
+			history.push(model_message);
+
+			// Print any thoughts/explanations the model outputs in this turn
+			const text_part = model_message.parts?.find(p => p.text);
+			const function_calls = model_message.parts?.filter(p => p.functionCall);
+			const has_function_calls = function_calls && function_calls.length > 0;
+
+			if (text_part && text_part.text) {
+				writeDetails(`\n[Model Thought]\n${text_part.text.trim()}`);
+				if (has_function_calls) {
+					updateProgress(`• ${text_part.text.trim()}`);
+				}
+			}
+
+			if (!has_function_calls) {
+				// No functions to call, we have reached the final state
+				finishProgress(text_part ? text_part.text : 'Task completed.');
+				break;
+			}
+
+			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
+			const response_parts = [];
+			for (const call_part of function_calls) {
+				const call = call_part.functionCall;
+				const { name, args, id } = call;
+
+				// Formulate a clean progress line for the tool call
+				let tool_str = name;
+				if (name === 'execute_system_command' && args.command) {
+					tool_str = args.command;
+				} else {
+					const arg_vals = Object.values(args)
+						.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+						.join(' ');
+					if (arg_vals) {
+						tool_str = `${name} ${arg_vals}`;
+					}
+				}
+
+				updateProgress(`• Running "${tool_str}"`);
+				writeDetails(`\n⚙️ [Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
+
+				const tool_fn = tools_mapping[name];
+				let result;
+				if (!tool_fn) {
+					result = { error: `Tool "${name}" is not implemented.` };
+				} else {
+					try {
+						result = await tool_fn(args);
+					} catch (err) {
+						result = { error: err.message || String(err) };
+					}
+				}
+
+				writeDetails(`⚙️ [Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
+
+				const function_response_part = {
+					functionResponse: {
+						name,
+						response: result
+					}
+				};
+				if (id) {
+					function_response_part.functionResponse.id = id;
+				}
+				response_parts.push(function_response_part);
+			}
+
+			// Push user/tool execution results back into the conversation history
+			history.push({
+				role: 'user',
+				parts: response_parts
+			});
+
+			// Save intermediate history state
+			fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+		} catch (err) {
+			finishProgressError(err.message || String(err));
+			break;
+		}
+	}
+
+	// Save final history state
+	fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+}
+
+main().catch(err => {
+	console.error('\x1b[31mFatal error:\x1b[0m', err);
+	playChime('error');
+	process.exit(1);
+});
