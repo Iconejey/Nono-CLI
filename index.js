@@ -33,7 +33,6 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 // Global Progress & Logging State
 let progress_lines = [];
 let lines_printed_last_time = 0;
-let total_shifted_out_lines = 0;
 let start_time = Date.now();
 let details_path = '';
 
@@ -135,27 +134,23 @@ function updateProgress(raw_text) {
 	progress_lines.push(line);
 	if (progress_lines.length > 5) {
 		progress_lines.shift();
-		total_shifted_out_lines++;
 	}
 	renderProgress();
 }
 
-function clearProgress(clear_all = false) {
-	const lines_to_clear = clear_all ? (lines_printed_last_time + total_shifted_out_lines) : lines_printed_last_time;
+function clearProgress() {
+	const lines_to_clear = lines_printed_last_time;
 	if (lines_to_clear > 0) {
 		for (let i = 0; i < lines_to_clear; i++) {
 			process.stdout.write('\x1b[A\x1b[2K');
 		}
 		lines_printed_last_time = 0;
 	}
-	if (clear_all) {
-		total_shifted_out_lines = 0;
-	}
 	progress_lines = [];
 }
 
 function finishProgress(final_text) {
-	clearProgress(true);
+	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	const formatted = formatMarkdownForTerminal(final_text.trim());
@@ -165,7 +160,7 @@ function finishProgress(final_text) {
 }
 
 function finishProgressError(err_msg) {
-	clearProgress(true);
+	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
