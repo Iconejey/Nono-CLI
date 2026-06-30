@@ -622,13 +622,13 @@ function getPrettierFlagsFromVSCode() {
 		const config_mapping = {
 			'prettier.arrowParens': val => `--arrow-parens ${val}`,
 			'prettier.printWidth': val => `--print-width ${val}`,
-			'prettier.singleQuote': val => val ? '--single-quote' : '--no-single-quote',
+			'prettier.singleQuote': val => (val ? '--single-quote' : '--no-single-quote'),
 			'prettier.tabWidth': val => `--tab-width ${val}`,
 			'prettier.trailingComma': val => `--trailing-comma ${val}`,
-			'prettier.useTabs': val => val ? '--use-tabs' : '--no-use-tabs',
-			'prettier.semi': val => val ? '--semi' : '--no-semi',
-			'prettier.bracketSpacing': val => val ? '--bracket-spacing' : '--no-bracket-spacing',
-			'prettier.jsxSingleQuote': val => val ? '--jsx-single-quote' : '--no-jsx-single-quote',
+			'prettier.useTabs': val => (val ? '--use-tabs' : '--no-use-tabs'),
+			'prettier.semi': val => (val ? '--semi' : '--no-semi'),
+			'prettier.bracketSpacing': val => (val ? '--bracket-spacing' : '--no-bracket-spacing'),
+			'prettier.jsxSingleQuote': val => (val ? '--jsx-single-quote' : '--no-jsx-single-quote'),
 			'prettier.proseWrap': val => `--prose-wrap ${val}`
 		};
 		for (const [key, map_fn] of Object.entries(config_mapping)) {
@@ -644,18 +644,7 @@ function getPrettierFlagsFromVSCode() {
 
 function hasProjectPrettierConfig(file_path) {
 	let current_dir = path.dirname(file_path);
-	const config_names = [
-		'.prettierrc',
-		'.prettierrc.json',
-		'.prettierrc.yaml',
-		'.prettierrc.yml',
-		'.prettierrc.js',
-		'.prettierrc.mjs',
-		'.prettierrc.cjs',
-		'prettier.config.js',
-		'prettier.config.mjs',
-		'prettier.config.cjs'
-	];
+	const config_names = ['.prettierrc', '.prettierrc.json', '.prettierrc.yaml', '.prettierrc.yml', '.prettierrc.js', '.prettierrc.mjs', '.prettierrc.cjs', 'prettier.config.js', 'prettier.config.mjs', 'prettier.config.cjs'];
 	const root = path.parse(current_dir).root;
 	while (true) {
 		for (const name of config_names) {
@@ -750,7 +739,7 @@ function writeFile({ file_path, content }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`• Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Writing ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -788,7 +777,7 @@ function patchFile({ file_path, search_block, replace_block }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`• Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Patching ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -1202,8 +1191,6 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
-
-
 	// Start the ReAct execution loop
 	while (true) {
 		try {
@@ -1260,9 +1247,10 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 				const { name, args, id } = call;
 
 				// Formulate a clean progress line for the tool call
-				const tool_progress = formatToolCallProgress(name, args);
-
-				updateProgress(`• ${tool_progress}`);
+				if (name !== 'write_file' && name !== 'patch_file') {
+					const tool_progress = formatToolCallProgress(name, args);
+					updateProgress(`• ${tool_progress}`);
+				}
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
 				const tool_fn = tools_mapping[name];
