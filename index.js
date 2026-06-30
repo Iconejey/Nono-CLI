@@ -107,7 +107,7 @@ function formatMarkdownForTerminal(md) {
 
 		// 3. Italics: *text* or _text_ -> Underline
 		line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
-		line = line.replace(/_([^_]+)_/g, '\x1b[4m$1\x1b[0m');
+		line = line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
 
 		formatted_lines.push(line);
 	}
