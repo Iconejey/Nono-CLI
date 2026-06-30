@@ -51,6 +51,17 @@ function formatProgressLine(text) {
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
+function getCleanThoughtLine(text) {
+	const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+	if (lines.length === 0) return '';
+	let first_line = lines[0];
+	first_line = first_line.replace(/[*_`#]/g, '');
+	if (first_line.length > 120) {
+		return first_line.slice(0, 117) + '...';
+	}
+	return first_line;
+}
+
 // Helper to format markdown text beautifully for the terminal output
 function formatMarkdownForTerminal(md) {
 	if (!md) return '';
@@ -905,7 +916,7 @@ You run on a ${os_name} host and operate in one of two modes:
 
 CRITICAL INSTRUCTIONS:
 - You operate using an Agentic Loop (ReAct: Reason + Act). Before invoking any tool, you MUST output your plan and reasoning.
-- Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy.
+- Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy. Do NOT dump the actual file contents or write full code blocks in your reasoning/thought block; keep the actual code strictly inside the tool parameters (arguments) to conserve tokens.
 - Deterministic Patching: Prefer patch_file over complete rewrites for existing files to conserve tokens and reduce errors.
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
 - If you need to search for code or references, use search_grep.
@@ -1099,7 +1110,10 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 			if (text_part && text_part.text) {
 				writeDetails(`\n[Model Thought]\n${text_part.text.trim()}`);
 				if (has_function_calls) {
-					updateProgress(`• ${text_part.text.trim()}`);
+					const thought_summary = getCleanThoughtLine(text_part.text);
+					if (thought_summary) {
+						updateProgress(`• ${thought_summary}`);
+					}
 				}
 			}
 
