@@ -608,13 +608,99 @@ function viewFileContents({ file_path, start_line, end_line }) {
 	};
 }
 
+function getPrettierFlagsFromVSCode() {
+	const settings_path = path.join(os.homedir(), '.config', 'Code', 'User', 'settings.json');
+	if (!fs.existsSync(settings_path)) {
+		return '';
+	}
+	try {
+		const raw = fs.readFileSync(settings_path, 'utf8');
+		// Remove comments (single line and multi line) from settings.json
+		const clean = raw.replace(/\/\*[\s\S]*?\*\/|([^\\:]|^)\/\/.*$/gm, '$1');
+		const settings = JSON.parse(clean);
+		const flags = [];
+		const config_mapping = {
+			'prettier.arrowParens': val => `--arrow-parens ${val}`,
+			'prettier.printWidth': val => `--print-width ${val}`,
+			'prettier.singleQuote': val => val ? '--single-quote' : '--no-single-quote',
+			'prettier.tabWidth': val => `--tab-width ${val}`,
+			'prettier.trailingComma': val => `--trailing-comma ${val}`,
+			'prettier.useTabs': val => val ? '--use-tabs' : '--no-use-tabs',
+			'prettier.semi': val => val ? '--semi' : '--no-semi',
+			'prettier.bracketSpacing': val => val ? '--bracket-spacing' : '--no-bracket-spacing',
+			'prettier.jsxSingleQuote': val => val ? '--jsx-single-quote' : '--no-jsx-single-quote',
+			'prettier.proseWrap': val => `--prose-wrap ${val}`
+		};
+		for (const [key, map_fn] of Object.entries(config_mapping)) {
+			if (settings[key] !== undefined) {
+				flags.push(map_fn(settings[key]));
+			}
+		}
+		return flags.join(' ');
+	} catch (e) {
+		return '';
+	}
+}
+
+function hasProjectPrettierConfig(file_path) {
+	let current_dir = path.dirname(file_path);
+	const config_names = [
+		'.prettierrc',
+		'.prettierrc.json',
+		'.prettierrc.yaml',
+		'.prettierrc.yml',
+		'.prettierrc.js',
+		'.prettierrc.mjs',
+		'.prettierrc.cjs',
+		'prettier.config.js',
+		'prettier.config.mjs',
+		'prettier.config.cjs'
+	];
+	const root = path.parse(current_dir).root;
+	while (true) {
+		for (const name of config_names) {
+			if (fs.existsSync(path.join(current_dir, name))) {
+				return true;
+			}
+		}
+		const parent = path.dirname(current_dir);
+		if (parent === current_dir || current_dir === root) {
+			break;
+		}
+		current_dir = parent;
+	}
+	current_dir = path.dirname(file_path);
+	while (true) {
+		const pkg_path = path.join(current_dir, 'package.json');
+		if (fs.existsSync(pkg_path)) {
+			try {
+				const pkg = JSON.parse(fs.readFileSync(pkg_path, 'utf8'));
+				if (pkg.prettier !== undefined) {
+					return true;
+				}
+			} catch (e) {}
+		}
+		const parent = path.dirname(current_dir);
+		if (parent === current_dir || current_dir === root) {
+			break;
+		}
+		current_dir = parent;
+	}
+	return false;
+}
+
 // Helper to format supported text files using Prettier
 function formatWithPrettier(file_path) {
 	const ext = path.extname(file_path).toLowerCase();
 	const formatable_exts = ['.js', '.jsx', '.ts', '.tsx', '.json', '.css', '.scss', '.html', '.md', '.markdown', '.yaml', '.yml'];
 	if (formatable_exts.includes(ext)) {
 		try {
-			execSync(`npx -y prettier --write ${JSON.stringify(file_path)}`, { stdio: 'ignore' });
+			let flags = '';
+			if (!hasProjectPrettierConfig(file_path)) {
+				flags = getPrettierFlagsFromVSCode();
+			}
+			const cmd = `npx -y prettier ${flags} --write ${JSON.stringify(file_path)}`;
+			execSync(cmd, { stdio: 'ignore' });
 		} catch (err) {
 			// Ignore formatter errors (e.g. syntax errors or missing prettier)
 		}
