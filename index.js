@@ -31,8 +31,6 @@ if (!api_key && process.argv[2] !== '--details' && process.argv[2] !== '--test-a
 const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 
 // Global Progress & Logging State
-let progress_lines = [];
-let lines_printed_last_time = 0;
 let start_time = Date.now();
 let details_path = '';
 
@@ -97,12 +95,12 @@ function formatMarkdownForTerminal(md) {
 		// 1. Inline code: `code` -> cyan
 		line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
 
-		// 2. Bold: **text** -> Bold Yellow
-		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1;33m$1\x1b[0m');
+		// 2. Bold: **text** -> Bold
+		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
 
-		// 3. Italics: *text* or _text_ -> Underline Dim Gray
-		line = line.replace(/\*([^*]+)\*/g, '\x1b[4;90m$1\x1b[0m');
-		line = line.replace(/_([^_]+)_/g, '\x1b[4;90m$1\x1b[0m');
+		// 3. Italics: *text* or _text_ -> Underline
+		line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
+		line = line.replace(/_([^_]+)_/g, '\x1b[4m$1\x1b[0m');
 
 		formatted_lines.push(line);
 	}
@@ -110,43 +108,13 @@ function formatMarkdownForTerminal(md) {
 	return formatted_lines.join('\n');
 }
 
-function renderProgress() {
-	if (lines_printed_last_time > 0) {
-		for (let i = 0; i < lines_printed_last_time; i++) {
-			process.stdout.write('\x1b[A\x1b[2K');
-		}
-	}
-	for (let i = 0; i < progress_lines.length; i++) {
-		const line = progress_lines[i];
-		const is_last = i === progress_lines.length - 1;
-		const is_prompt = line.includes('[Y/n]') || line.includes('[y/N]');
-		if (is_last && is_prompt) {
-			process.stdout.write(line);
-		} else {
-			process.stdout.write(line + '\n');
-		}
-	}
-	lines_printed_last_time = progress_lines.length;
-}
-
 function updateProgress(raw_text) {
 	const line = formatProgressLine(raw_text);
-	progress_lines.push(line);
-	if (progress_lines.length > 5) {
-		progress_lines.shift();
-	}
-	renderProgress();
+	console.log(line);
 }
 
 function clearProgress() {
-	const lines_to_clear = lines_printed_last_time;
-	if (lines_to_clear > 0) {
-		for (let i = 0; i < lines_to_clear; i++) {
-			process.stdout.write('\x1b[A\x1b[2K');
-		}
-		lines_printed_last_time = 0;
-	}
-	progress_lines = [];
+	// No-op since we don't roll/clear progress lines anymore
 }
 
 function finishProgress(final_text) {
@@ -645,7 +613,7 @@ function writeFile({ file_path, content }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -683,7 +651,7 @@ function patchFile({ file_path, search_block, replace_block }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
