@@ -1116,7 +1116,7 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
-	updateProgress('• Thinking...');
+
 
 	// Start the ReAct execution loop
 	while (true) {
