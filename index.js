@@ -46,12 +46,8 @@ function formatProgressLine(text) {
 		ansi_prefix = '\x1b[31m'; // Red
 	}
 	const ansi_suffix = '\x1b[0m';
-	const max_len = Math.min(80, (process.stdout.columns || 80) - 5);
 
 	let raw = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-	if (raw.length > max_len) {
-		raw = raw.slice(0, max_len - 3) + '...';
-	}
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
@@ -914,6 +910,7 @@ CRITICAL INSTRUCTIONS:
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
+- Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 
 Guidelines:
 - Keep your final output concise and accurate.
