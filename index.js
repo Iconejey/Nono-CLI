@@ -52,7 +52,10 @@ function formatProgressLine(text) {
 }
 
 function getCleanThoughtLine(text) {
-	const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+	const lines = text
+		.split('\n')
+		.map(l => l.trim())
+		.filter(l => l.length > 0);
 	if (lines.length === 0) return '';
 	let first_line = lines[0];
 	first_line = first_line.replace(/[*_`#]/g, '');
@@ -60,6 +63,49 @@ function getCleanThoughtLine(text) {
 		return first_line.slice(0, 117) + '...';
 	}
 	return first_line;
+}
+
+function formatToolCallProgress(name, args) {
+	const basename = args.file_path ? path.basename(args.file_path) : '';
+
+	switch (name) {
+		case 'list_directory_structure': {
+			const dir = args.directory_path ? path.basename(args.directory_path) || args.directory_path : '.';
+			return `Listing directory structure of "${dir}"`;
+		}
+		case 'view_file_contents': {
+			let lines_str = '';
+			if (args.start_line !== undefined && args.end_line !== undefined) {
+				lines_str = ` (lines ${args.start_line}-${args.end_line})`;
+			} else if (args.start_line !== undefined) {
+				lines_str = ` (from line ${args.start_line})`;
+			} else if (args.end_line !== undefined) {
+				lines_str = ` (up to line ${args.end_line})`;
+			}
+			return `Viewing ${basename}${lines_str}`;
+		}
+		case 'write_file': {
+			return `Writing ${basename}`;
+		}
+		case 'patch_file': {
+			return `Patching ${basename}`;
+		}
+		case 'search_grep': {
+			return `Searching for "${args.pattern}"`;
+		}
+		case 'execute_system_command': {
+			return `Running "${args.command}"`;
+		}
+		case 'propose_terminal_input': {
+			return `Proposing terminal input: "${args.command_to_inject}"`;
+		}
+		default: {
+			const arg_vals = Object.values(args)
+				.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+				.join(' ');
+			return arg_vals ? `${name} ${arg_vals}` : name;
+		}
+	}
 }
 
 // Helper to format markdown text beautifully for the terminal output
@@ -240,16 +286,14 @@ function playChime(type) {
 	}
 
 	// Scale volume using the configured volume scale factor
-	tones.forEach(t => t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale);
+	tones.forEach(t => (t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale));
 
 	try {
 		const wav_buffer = generateChimeWav(tones);
 		const temp_path = path.join(os.tmpdir(), `nono-chime-${type}.wav`);
 		fs.writeFileSync(temp_path, wav_buffer);
 
-		const player = fs.existsSync('/usr/bin/pw-play') 
-			? 'pw-play' 
-			: (fs.existsSync('/usr/bin/paplay') ? 'paplay' : (fs.existsSync('/usr/bin/aplay') ? 'aplay' : null));
+		const player = fs.existsSync('/usr/bin/pw-play') ? 'pw-play' : fs.existsSync('/usr/bin/paplay') ? 'paplay' : fs.existsSync('/usr/bin/aplay') ? 'aplay' : null;
 
 		if (player) {
 			spawn(player, [temp_path], { stdio: 'ignore', detached: true }).unref();
@@ -279,13 +323,13 @@ function askUserInRoll(question) {
 	playChime('question');
 	updateProgress(question);
 
-	return new Promise((resolve) => {
+	return new Promise(resolve => {
 		const rl = readline.createInterface({
 			input: process.stdin,
 			output: process.stdout,
 			terminal: true
 		});
-		rl.on('line', (line) => {
+		rl.on('line', line => {
 			rl.close();
 			resolve(line);
 		});
@@ -297,21 +341,21 @@ function runInteractiveSudo() {
 	return new Promise((resolve, reject) => {
 		const child = spawn('sudo', ['true'], { stdio: ['inherit', 'pipe', 'pipe'] });
 
-		child.stdout.on('data', (data) => {
+		child.stdout.on('data', data => {
 			const text = data.toString().trim();
 			if (text) {
 				updateProgress(`• ${text}`);
 			}
 		});
 
-		child.stderr.on('data', (data) => {
+		child.stderr.on('data', data => {
 			const text = data.toString().trim();
 			if (text) {
 				updateProgress(`• ${text}`);
 			}
 		});
 
-		child.on('close', (code) => {
+		child.on('close', code => {
 			if (code === 0) {
 				resolve();
 			} else {
@@ -959,8 +1003,8 @@ async function main() {
 
 	// Handle nono --test-audio argument
 	if (process.argv[2] === '--test-audio') {
-		const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-		
+		const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 		console.log(`\n\x1b[35m=== Nono Audio Diagnostics ===\x1b[0m`);
 		console.log(`Current Volume Level: ${Math.round(volume_scale * 100)}%\n`);
 
@@ -1130,20 +1174,10 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 				const { name, args, id } = call;
 
 				// Formulate a clean progress line for the tool call
-				let tool_str = name;
-				if (name === 'execute_system_command' && args.command) {
-					tool_str = args.command;
-				} else {
-					const arg_vals = Object.values(args)
-						.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
-						.join(' ');
-					if (arg_vals) {
-						tool_str = `${name} ${arg_vals}`;
-					}
-				}
+				const tool_progress = formatToolCallProgress(name, args);
 
-				updateProgress(`• Running "${tool_str}"`);
-				writeDetails(`\n⚙️ [Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
+				updateProgress(`• ${tool_progress}`);
+				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
 				const tool_fn = tools_mapping[name];
 				let result;
@@ -1157,7 +1191,7 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 					}
 				}
 
-				writeDetails(`⚙️ [Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
+				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
 				const function_response_part = {
 					functionResponse: {
