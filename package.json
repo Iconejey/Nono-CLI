@@ -9,6 +9,7 @@
 	},
 	"dependencies": {
 		"@google/genai": "^2.10.0",
+		"cli-highlight": "^2.1.11",
 		"dotenv": "^17.4.2"
 	}
 }

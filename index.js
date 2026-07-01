@@ -8,6 +8,7 @@ import { exec, execSync, spawn } from 'child_process';
 import readline from 'readline';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import cliHighlight from 'cli-highlight';
 
 // Load environment variables from the directory of this script or fallback locations
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
@@ -39,6 +40,72 @@ function writeDetails(text) {
 		fs.appendFileSync(details_path, text + '\n', 'utf8');
 	}
 }
+
+function loadCustomTheme() {
+	let theme_json_str = '';
+
+	// 1. Check if NONO_THEME is set in the environment
+	if (process.env.NONO_THEME) {
+		const theme_val = process.env.NONO_THEME.trim();
+		if (theme_val.startsWith('{')) {
+			theme_json_str = theme_val;
+		} else {
+			const resolved_path = path.resolve(theme_val.replace(/^~/, os.homedir()));
+			if (fs.existsSync(resolved_path)) {
+				try {
+					theme_json_str = fs.readFileSync(resolved_path, 'utf8');
+				} catch (e) {
+					// Ignore read errors
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to default config location: ~/.config/nono/theme.json
+	if (!theme_json_str) {
+		const default_theme_path = path.join(os.homedir(), '.config', 'nono', 'theme.json');
+		if (fs.existsSync(default_theme_path)) {
+			try {
+				theme_json_str = fs.readFileSync(default_theme_path, 'utf8');
+			} catch (e) {
+				// Ignore read errors
+			}
+		}
+	}
+
+	// 3. Fallback to hardcoded default theme (VS Code Material Theme Darker mapping)
+	if (!theme_json_str) {
+		theme_json_str = JSON.stringify({
+			keyword: 'magenta',
+			built_in: 'blue',
+			type: 'yellow',
+			literal: 'yellow',
+			number: 'yellow',
+			regexp: 'cyan',
+			string: 'green',
+			comment: 'gray',
+			class: 'blue',
+			function: 'blue',
+			tag: 'red',
+			name: 'blue',
+			attr: 'cyan',
+			addition: 'green',
+			deletion: 'red',
+			default: 'white'
+		});
+	}
+
+	if (theme_json_str) {
+		try {
+			return cliHighlight.parse(theme_json_str);
+		} catch (err) {
+			writeDetails(`[Theme Load Error] Failed to parse custom theme JSON: ${err.message}`);
+		}
+	}
+	return undefined;
+}
+
+const custom_theme = loadCustomTheme();
 
 function formatProgressLine(text) {
 	let ansi_prefix = '\x1b[90m'; // Default gray
@@ -114,17 +181,42 @@ function formatMarkdownForTerminal(md) {
 	const lines = md.split('\n');
 	const formatted_lines = [];
 	let in_code_block = false;
+	let code_block_lines = [];
+	let code_block_lang = '';
 
 	for (let line of lines) {
 		// Handle Code Block delimiters
 		if (line.trim().startsWith('```')) {
-			in_code_block = !in_code_block;
+			if (!in_code_block) {
+				in_code_block = true;
+				code_block_lang = line.trim().slice(3).trim();
+				code_block_lines = [];
+			} else {
+				in_code_block = false;
+				const code_text = code_block_lines.join('\n');
+				const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
+				let highlighted_text = code_text;
+				if (is_highlighted) {
+					try {
+						highlighted_text = cliHighlight.highlight(code_text, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+					} catch (e) {
+						// fallback
+					}
+				}
+				const highlighted_lines = highlighted_text.split('\n');
+				for (const h_line of highlighted_lines) {
+					if (is_highlighted) {
+						formatted_lines.push(`  \x1b[90m│\x1b[0m  ${h_line}`);
+					} else {
+						formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${h_line}\x1b[0m`);
+					}
+				}
+			}
 			continue;
 		}
 
 		if (in_code_block) {
-			// Style code block lines: dim gray with a left border
-			formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${line}\x1b[0m`);
+			code_block_lines.push(line);
 			continue;
 		}
 
@@ -156,6 +248,27 @@ function formatMarkdownForTerminal(md) {
 		line = line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
 
 		formatted_lines.push(line);
+	}
+
+	if (in_code_block && code_block_lines.length > 0) {
+		const code_text = code_block_lines.join('\n');
+		const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
+		let highlighted_text = code_text;
+		if (is_highlighted) {
+			try {
+				highlighted_text = cliHighlight.highlight(code_text, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+			} catch (e) {
+				// fallback
+			}
+		}
+		const highlighted_lines = highlighted_text.split('\n');
+		for (const h_line of highlighted_lines) {
+			if (is_highlighted) {
+				formatted_lines.push(`  \x1b[90m│\x1b[0m  ${h_line}`);
+			} else {
+				formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${h_line}\x1b[0m`);
+			}
+		}
 	}
 
 	return formatted_lines.join('\n');
@@ -1045,6 +1158,7 @@ CRITICAL INSTRUCTIONS:
 Guidelines:
 - Keep your final output concise and accurate.
 - Maintain documentation integrity.
+- Always specify the language name (e.g., \`\`\`javascript, \`\`\`python, \`\`\`bash) when writing a markdown code block to ensure proper terminal syntax highlighting.
 `;
 
 // ----------------------------------------------------
