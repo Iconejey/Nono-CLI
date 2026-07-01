@@ -9,6 +9,8 @@ import readline from 'readline';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import cliHighlight from 'cli-highlight';
+import prettier from 'prettier';
+
 
 // Load environment variables from the directory of this script or fallback locations
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
@@ -175,8 +177,47 @@ function formatToolCallProgress(name, args) {
 	}
 }
 
+const languageToParser = {
+	js: 'babel',
+	javascript: 'babel',
+	jsx: 'babel',
+	mjs: 'babel',
+	cjs: 'babel',
+	ts: 'typescript',
+	typescript: 'typescript',
+	tsx: 'typescript',
+	json: 'json',
+	json5: 'json',
+	css: 'css',
+	scss: 'scss',
+	less: 'less',
+	html: 'html',
+	yaml: 'yaml',
+	yml: 'yaml',
+	md: 'markdown',
+	markdown: 'markdown'
+};
+
+async function formatCodeWithPrettier(code, lang) {
+	if (!lang) return code;
+	const parser = languageToParser[lang.toLowerCase()];
+	if (!parser) {
+		return code;
+	}
+	try {
+		const config = await prettier.resolveConfig(process.cwd()) || {};
+		const formatted = await prettier.format(code, {
+			...config,
+			parser
+		});
+		return formatted.trimEnd();
+	} catch (e) {
+		return code;
+	}
+}
+
 // Helper to format markdown text beautifully for the terminal output
-function formatMarkdownForTerminal(md) {
+async function formatMarkdownForTerminal(md) {
 	if (!md) return '';
 	const lines = md.split('\n');
 	const formatted_lines = [];
@@ -198,7 +239,8 @@ function formatMarkdownForTerminal(md) {
 				let highlighted_text = code_text;
 				if (is_highlighted) {
 					try {
-						highlighted_text = cliHighlight.highlight(code_text, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
+						highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
 					} catch (e) {
 						// fallback
 					}
@@ -256,7 +298,8 @@ function formatMarkdownForTerminal(md) {
 		let highlighted_text = code_text;
 		if (is_highlighted) {
 			try {
-				highlighted_text = cliHighlight.highlight(code_text, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+				const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
+				highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
 			} catch (e) {
 				// fallback
 			}
@@ -283,11 +326,11 @@ function clearProgress() {
 	// No-op since we don't roll/clear progress lines anymore
 }
 
-function finishProgress(final_text) {
+async function finishProgress(final_text) {
 	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
-	const formatted = formatMarkdownForTerminal(final_text.trim());
+	const formatted = await formatMarkdownForTerminal(final_text.trim());
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
@@ -1239,7 +1282,7 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 *Note: Please ensure the PAM module rules are kept aligned with the security constraints.*`;
 
 		console.log(`\n\x1b[35m=== Nono Markdown Formatting Test ===\x1b[0m\n`);
-		console.log(`\x1b[35m✦\x1b[0m ${formatMarkdownForTerminal(test_markdown)}`);
+		console.log(`\x1b[35m✦\x1b[0m ${await formatMarkdownForTerminal(test_markdown)}`);
 		console.log();
 		process.exit(0);
 		return;
@@ -1350,7 +1393,7 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 
 			if (!has_function_calls) {
 				// No functions to call, we have reached the final state
-				finishProgress(text_part ? text_part.text : 'Task completed.');
+				await finishProgress(text_part ? text_part.text : 'Task completed.');
 				break;
 			}
 
