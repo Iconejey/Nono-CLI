@@ -31,9 +31,6 @@ if (!api_key && process.argv[2] !== '--details' && process.argv[2] !== '--test-a
 const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 
 // Global Progress & Logging State
-let progress_lines = [];
-let lines_printed_last_time = 0;
-let total_shifted_out_lines = 0;
 let start_time = Date.now();
 let details_path = '';
 
@@ -49,13 +46,66 @@ function formatProgressLine(text) {
 		ansi_prefix = '\x1b[31m'; // Red
 	}
 	const ansi_suffix = '\x1b[0m';
-	const max_len = Math.min(80, (process.stdout.columns || 80) - 5);
 
 	let raw = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-	if (raw.length > max_len) {
-		raw = raw.slice(0, max_len - 3) + '...';
-	}
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
+}
+
+function getCleanThoughtLine(text) {
+	const lines = text
+		.split('\n')
+		.map(l => l.trim())
+		.filter(l => l.length > 0);
+	if (lines.length === 0) return '';
+	let first_line = lines[0];
+	first_line = first_line.replace(/[*_`#]/g, '');
+	if (first_line.length > 120) {
+		return first_line.slice(0, 117) + '...';
+	}
+	return first_line;
+}
+
+function formatToolCallProgress(name, args) {
+	const basename = args.file_path ? path.basename(args.file_path) : '';
+
+	switch (name) {
+		case 'list_directory_structure': {
+			const dir = args.directory_path ? path.basename(args.directory_path) || args.directory_path : '.';
+			return `Listing directory structure of "${dir}"`;
+		}
+		case 'view_file_contents': {
+			let lines_str = '';
+			if (args.start_line !== undefined && args.end_line !== undefined) {
+				lines_str = ` (lines ${args.start_line}-${args.end_line})`;
+			} else if (args.start_line !== undefined) {
+				lines_str = ` (from line ${args.start_line})`;
+			} else if (args.end_line !== undefined) {
+				lines_str = ` (up to line ${args.end_line})`;
+			}
+			return `Viewing ${basename}${lines_str}`;
+		}
+		case 'write_file': {
+			return `Writing ${basename}`;
+		}
+		case 'patch_file': {
+			return `Patching ${basename}`;
+		}
+		case 'search_grep': {
+			return `Searching for "${args.pattern}"`;
+		}
+		case 'execute_system_command': {
+			return `Running "${args.command}"`;
+		}
+		case 'propose_terminal_input': {
+			return `Proposing terminal input: "${args.command_to_inject}"`;
+		}
+		default: {
+			const arg_vals = Object.values(args)
+				.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+				.join(' ');
+			return arg_vals ? `${name} ${arg_vals}` : name;
+		}
+	}
 }
 
 // Helper to format markdown text beautifully for the terminal output
@@ -98,12 +148,12 @@ function formatMarkdownForTerminal(md) {
 		// 1. Inline code: `code` -> cyan
 		line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
 
-		// 2. Bold: **text** -> Bold Yellow
-		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1;33m$1\x1b[0m');
+		// 2. Bold: **text** -> Bold
+		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
 
-		// 3. Italics: *text* or _text_ -> Underline Dim Gray
-		line = line.replace(/\*([^*]+)\*/g, '\x1b[4;90m$1\x1b[0m');
-		line = line.replace(/_([^_]+)_/g, '\x1b[4;90m$1\x1b[0m');
+		// 3. Italics: *text* or _text_ -> Underline
+		line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
+		line = line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
 
 		formatted_lines.push(line);
 	}
@@ -111,51 +161,17 @@ function formatMarkdownForTerminal(md) {
 	return formatted_lines.join('\n');
 }
 
-function renderProgress() {
-	if (lines_printed_last_time > 0) {
-		for (let i = 0; i < lines_printed_last_time; i++) {
-			process.stdout.write('\x1b[A\x1b[2K');
-		}
-	}
-	for (let i = 0; i < progress_lines.length; i++) {
-		const line = progress_lines[i];
-		const is_last = i === progress_lines.length - 1;
-		const is_prompt = line.includes('[Y/n]') || line.includes('[y/N]');
-		if (is_last && is_prompt) {
-			process.stdout.write(line);
-		} else {
-			process.stdout.write(line + '\n');
-		}
-	}
-	lines_printed_last_time = progress_lines.length;
-}
-
 function updateProgress(raw_text) {
 	const line = formatProgressLine(raw_text);
-	progress_lines.push(line);
-	if (progress_lines.length > 5) {
-		progress_lines.shift();
-		total_shifted_out_lines++;
-	}
-	renderProgress();
+	console.log(line);
 }
 
-function clearProgress(clear_all = false) {
-	const lines_to_clear = clear_all ? (lines_printed_last_time + total_shifted_out_lines) : lines_printed_last_time;
-	if (lines_to_clear > 0) {
-		for (let i = 0; i < lines_to_clear; i++) {
-			process.stdout.write('\x1b[A\x1b[2K');
-		}
-		lines_printed_last_time = 0;
-	}
-	if (clear_all) {
-		total_shifted_out_lines = 0;
-	}
-	progress_lines = [];
+function clearProgress() {
+	// No-op since we don't roll/clear progress lines anymore
 }
 
 function finishProgress(final_text) {
-	clearProgress(true);
+	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	const formatted = formatMarkdownForTerminal(final_text.trim());
@@ -165,7 +181,7 @@ function finishProgress(final_text) {
 }
 
 function finishProgressError(err_msg) {
-	clearProgress(true);
+	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
@@ -270,16 +286,14 @@ function playChime(type) {
 	}
 
 	// Scale volume using the configured volume scale factor
-	tones.forEach(t => t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale);
+	tones.forEach(t => (t.gain = (t.gain !== undefined ? t.gain : 0.15) * volume_scale));
 
 	try {
 		const wav_buffer = generateChimeWav(tones);
 		const temp_path = path.join(os.tmpdir(), `nono-chime-${type}.wav`);
 		fs.writeFileSync(temp_path, wav_buffer);
 
-		const player = fs.existsSync('/usr/bin/pw-play') 
-			? 'pw-play' 
-			: (fs.existsSync('/usr/bin/paplay') ? 'paplay' : (fs.existsSync('/usr/bin/aplay') ? 'aplay' : null));
+		const player = fs.existsSync('/usr/bin/pw-play') ? 'pw-play' : fs.existsSync('/usr/bin/paplay') ? 'paplay' : fs.existsSync('/usr/bin/aplay') ? 'aplay' : null;
 
 		if (player) {
 			spawn(player, [temp_path], { stdio: 'ignore', detached: true }).unref();
@@ -309,13 +323,13 @@ function askUserInRoll(question) {
 	playChime('question');
 	updateProgress(question);
 
-	return new Promise((resolve) => {
+	return new Promise(resolve => {
 		const rl = readline.createInterface({
 			input: process.stdin,
 			output: process.stdout,
 			terminal: true
 		});
-		rl.on('line', (line) => {
+		rl.on('line', line => {
 			rl.close();
 			resolve(line);
 		});
@@ -327,21 +341,21 @@ function runInteractiveSudo() {
 	return new Promise((resolve, reject) => {
 		const child = spawn('sudo', ['true'], { stdio: ['inherit', 'pipe', 'pipe'] });
 
-		child.stdout.on('data', (data) => {
+		child.stdout.on('data', data => {
 			const text = data.toString().trim();
 			if (text) {
 				updateProgress(`• ${text}`);
 			}
 		});
 
-		child.stderr.on('data', (data) => {
+		child.stderr.on('data', data => {
 			const text = data.toString().trim();
 			if (text) {
 				updateProgress(`• ${text}`);
 			}
 		});
 
-		child.on('close', (code) => {
+		child.on('close', code => {
 			if (code === 0) {
 				resolve();
 			} else {
@@ -576,13 +590,92 @@ function viewFileContents({ file_path, start_line, end_line }) {
 	const end = end_line ? Math.min(lines.length, end_line) : lines.length;
 
 	const sliced_lines = lines.slice(start - 1, end);
+	let raw_content = sliced_lines.join('\n');
+	let is_truncated = false;
+	const max_chars = 30000;
+	if (raw_content.length > max_chars) {
+		raw_content = raw_content.slice(0, max_chars) + '\n[... Content truncated to prevent excessive token usage ...]';
+		is_truncated = true;
+	}
+
 	return {
 		file_path,
 		total_lines: lines.length,
 		start_line: start,
 		end_line: end,
-		content: sliced_lines.join('\n')
+		is_truncated,
+		content: raw_content
 	};
+}
+
+function getPrettierFlagsFromVSCode() {
+	const settings_path = path.join(os.homedir(), '.config', 'Code', 'User', 'settings.json');
+	if (!fs.existsSync(settings_path)) {
+		return '';
+	}
+	try {
+		const raw = fs.readFileSync(settings_path, 'utf8');
+		// Remove comments (single line and multi line) from settings.json
+		const clean = raw.replace(/\/\*[\s\S]*?\*\/|([^\\:]|^)\/\/.*$/gm, '$1');
+		const settings = JSON.parse(clean);
+		const flags = [];
+		const config_mapping = {
+			'prettier.arrowParens': val => `--arrow-parens ${val}`,
+			'prettier.printWidth': val => `--print-width ${val}`,
+			'prettier.singleQuote': val => (val ? '--single-quote' : '--no-single-quote'),
+			'prettier.tabWidth': val => `--tab-width ${val}`,
+			'prettier.trailingComma': val => `--trailing-comma ${val}`,
+			'prettier.useTabs': val => (val ? '--use-tabs' : '--no-use-tabs'),
+			'prettier.semi': val => (val ? '--semi' : '--no-semi'),
+			'prettier.bracketSpacing': val => (val ? '--bracket-spacing' : '--no-bracket-spacing'),
+			'prettier.jsxSingleQuote': val => (val ? '--jsx-single-quote' : '--no-jsx-single-quote'),
+			'prettier.proseWrap': val => `--prose-wrap ${val}`
+		};
+		for (const [key, map_fn] of Object.entries(config_mapping)) {
+			if (settings[key] !== undefined) {
+				flags.push(map_fn(settings[key]));
+			}
+		}
+		return flags.join(' ');
+	} catch (e) {
+		return '';
+	}
+}
+
+function hasProjectPrettierConfig(file_path) {
+	let current_dir = path.dirname(file_path);
+	const config_names = ['.prettierrc', '.prettierrc.json', '.prettierrc.yaml', '.prettierrc.yml', '.prettierrc.js', '.prettierrc.mjs', '.prettierrc.cjs', 'prettier.config.js', 'prettier.config.mjs', 'prettier.config.cjs'];
+	const root = path.parse(current_dir).root;
+	while (true) {
+		for (const name of config_names) {
+			if (fs.existsSync(path.join(current_dir, name))) {
+				return true;
+			}
+		}
+		const parent = path.dirname(current_dir);
+		if (parent === current_dir || current_dir === root) {
+			break;
+		}
+		current_dir = parent;
+	}
+	current_dir = path.dirname(file_path);
+	while (true) {
+		const pkg_path = path.join(current_dir, 'package.json');
+		if (fs.existsSync(pkg_path)) {
+			try {
+				const pkg = JSON.parse(fs.readFileSync(pkg_path, 'utf8'));
+				if (pkg.prettier !== undefined) {
+					return true;
+				}
+			} catch (e) {}
+		}
+		const parent = path.dirname(current_dir);
+		if (parent === current_dir || current_dir === root) {
+			break;
+		}
+		current_dir = parent;
+	}
+	return false;
 }
 
 // Helper to format supported text files using Prettier
@@ -591,7 +684,12 @@ function formatWithPrettier(file_path) {
 	const formatable_exts = ['.js', '.jsx', '.ts', '.tsx', '.json', '.css', '.scss', '.html', '.md', '.markdown', '.yaml', '.yml'];
 	if (formatable_exts.includes(ext)) {
 		try {
-			execSync(`npx -y prettier --write ${JSON.stringify(file_path)}`, { stdio: 'ignore' });
+			let flags = '';
+			if (!hasProjectPrettierConfig(file_path)) {
+				flags = getPrettierFlagsFromVSCode();
+			}
+			const cmd = `npx -y prettier ${flags} --write ${JSON.stringify(file_path)}`;
+			execSync(cmd, { stdio: 'ignore' });
 		} catch (err) {
 			// Ignore formatter errors (e.g. syntax errors or missing prettier)
 		}
@@ -641,7 +739,7 @@ function writeFile({ file_path, content }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Writing ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -679,7 +777,7 @@ function patchFile({ file_path, search_block, replace_block }) {
 
 	const final_content = fs.readFileSync(abs_path, 'utf8');
 	const { deleted, added } = getLineDiff(old_content, final_content);
-	updateProgress(`Edited ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+	updateProgress(`• Patching ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
 	const lint_result = runProjectDryRun(abs_path);
 	return {
@@ -702,9 +800,17 @@ function searchGrep({ pattern, directory_path }) {
 					error: stderr || error.message
 				});
 			} else {
+				const max_chars = 30000;
+				let matches = stdout.trim() || 'No matches found.';
+				let is_truncated = false;
+				if (matches.length > max_chars) {
+					matches = matches.slice(0, max_chars) + '\n[... Matches truncated to prevent excessive token usage ...]';
+					is_truncated = true;
+				}
 				resolve({
 					status: 'success',
-					matches: stdout.trim() || 'No matches found.'
+					is_truncated,
+					matches: matches
 				});
 			}
 		});
@@ -744,9 +850,26 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 
 	return new Promise(resolve => {
 		exec(command, { timeout: timeout_ms }, (error, stdout, stderr) => {
+			const max_chars = 30000;
+			let truncated_stdout = stdout;
+			let truncated_stderr = stderr;
+			let stdout_truncated = false;
+			let stderr_truncated = false;
+
+			if (stdout && stdout.length > max_chars) {
+				truncated_stdout = stdout.slice(0, max_chars) + '\n[... stdout truncated to prevent excessive token usage ...]';
+				stdout_truncated = true;
+			}
+			if (stderr && stderr.length > max_chars) {
+				truncated_stderr = stderr.slice(0, max_chars) + '\n[... stderr truncated to prevent excessive token usage ...]';
+				stderr_truncated = true;
+			}
+
 			resolve({
-				stdout: stdout,
-				stderr: stderr,
+				stdout: truncated_stdout,
+				stderr: truncated_stderr,
+				stdout_truncated,
+				stderr_truncated,
 				exit_code: error ? error.code || 1 : 0
 			});
 		});
@@ -832,7 +955,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'view_file_contents',
-		description: 'Reads the exact content of a file. Supports line-range targeting for processing large source files safely.',
+		description: 'Reads the content of a file. Supports line-range targeting. Note: Outputs exceeding 30,000 characters will be truncated.',
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -870,7 +993,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'search_grep',
-		description: 'Performs a fast regex-based substring search across the workspace (equivalent to ripgrep) to find references or declarations.',
+		description: 'Performs a fast regex-based substring search across the workspace (equivalent to ripgrep) to find references or declarations. Note: Outputs exceeding 30,000 characters will be truncated.',
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -882,7 +1005,7 @@ const tools_declarations = [
 	},
 	{
 		name: 'execute_system_command',
-		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code.`,
+		description: `Executes a non-blocking or blocking bash command on the ${os_name} host. Returns stdout, stderr, and exit status code. Note: stdout and stderr exceeding 30,000 characters each will be truncated.`,
 		parameters: {
 			type: 'OBJECT',
 			properties: {
@@ -912,11 +1035,12 @@ You run on a ${os_name} host and operate in one of two modes:
 
 CRITICAL INSTRUCTIONS:
 - You operate using an Agentic Loop (ReAct: Reason + Act). Before invoking any tool, you MUST output your plan and reasoning.
-- Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy.
+- Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy. Do NOT dump the actual file contents or write full code blocks in your reasoning/thought block; keep the actual code strictly inside the tool parameters (arguments) to conserve tokens.
 - Deterministic Patching: Prefer patch_file over complete rewrites for existing files to conserve tokens and reduce errors.
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
+- Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 
 Guidelines:
 - Keep your final output concise and accurate.
@@ -954,8 +1078,8 @@ async function main() {
 
 	// Handle nono --test-audio argument
 	if (process.argv[2] === '--test-audio') {
-		const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-		
+		const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 		console.log(`\n\x1b[35m=== Nono Audio Diagnostics ===\x1b[0m`);
 		console.log(`Current Volume Level: ${Math.round(volume_scale * 100)}%\n`);
 
@@ -1067,8 +1191,6 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
-	updateProgress('• Thinking...');
-
 	// Start the ReAct execution loop
 	while (true) {
 		try {
@@ -1105,7 +1227,10 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 			if (text_part && text_part.text) {
 				writeDetails(`\n[Model Thought]\n${text_part.text.trim()}`);
 				if (has_function_calls) {
-					updateProgress(`• ${text_part.text.trim()}`);
+					const thought_summary = getCleanThoughtLine(text_part.text);
+					if (thought_summary) {
+						updateProgress(`• ${thought_summary}`);
+					}
 				}
 			}
 
@@ -1122,20 +1247,11 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 				const { name, args, id } = call;
 
 				// Formulate a clean progress line for the tool call
-				let tool_str = name;
-				if (name === 'execute_system_command' && args.command) {
-					tool_str = args.command;
-				} else {
-					const arg_vals = Object.values(args)
-						.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
-						.join(' ');
-					if (arg_vals) {
-						tool_str = `${name} ${arg_vals}`;
-					}
+				if (name !== 'write_file' && name !== 'patch_file') {
+					const tool_progress = formatToolCallProgress(name, args);
+					updateProgress(`• ${tool_progress}`);
 				}
-
-				updateProgress(`• Running "${tool_str}"`);
-				writeDetails(`\n⚙️ [Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
+				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
 				const tool_fn = tools_mapping[name];
 				let result;
@@ -1149,7 +1265,7 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 					}
 				}
 
-				writeDetails(`⚙️ [Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
+				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
 				const function_response_part = {
 					functionResponse: {
