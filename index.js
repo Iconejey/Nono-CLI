@@ -1214,6 +1214,31 @@ async function main() {
 		fs.mkdirSync(cache_dir, { recursive: true });
 	}
 
+	// Handle nono --clear argument
+	if (process.argv[2] === '--clear') {
+		// Clear terminal screen and scrollback
+		process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+
+		// Delete session and details files for current session
+		const session_path = path.join(cache_dir, `session-${process.ppid}.json`);
+		const details_file = path.join(cache_dir, `details-${process.ppid}.log`);
+
+		try {
+			if (fs.existsSync(session_path)) {
+				fs.unlinkSync(session_path);
+			}
+			if (fs.existsSync(details_file)) {
+				fs.unlinkSync(details_file);
+			}
+			console.log('\x1b[32m✔ Nono session cleared. Ready for a new chat!\x1b[0m\n');
+		} catch (err) {
+			console.error(`\x1b[31mError clearing session: ${err.message}\x1b[0m`);
+			process.exit(1);
+		}
+		process.exit(0);
+		return;
+	}
+
 	// Handle nono --details argument
 	if (process.argv[2] === '--details') {
 		const details_file = path.join(cache_dir, `details-${process.ppid}.log`);
