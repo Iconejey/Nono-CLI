@@ -11,7 +11,6 @@ import { GoogleGenAI } from '@google/genai';
 import cliHighlight from 'cli-highlight';
 import prettier from 'prettier';
 
-
 // Load environment variables from the directory of this script or fallback locations
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
 process.env.DOTENV_LOG_LEVEL = 'none';
@@ -205,7 +204,7 @@ async function formatCodeWithPrettier(code, lang) {
 		return code;
 	}
 	try {
-		const config = await prettier.resolveConfig(process.cwd()) || {};
+		const config = (await prettier.resolveConfig(process.cwd())) || {};
 		const formatted = await prettier.format(code, {
 			...config,
 			parser
@@ -331,7 +330,9 @@ async function finishProgress(final_text) {
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
 	const formatted = await formatMarkdownForTerminal(final_text.trim());
+	console.log();
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
+	console.log();
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
 }
