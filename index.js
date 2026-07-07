@@ -24,7 +24,7 @@ const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 
-if (!api_key && !['--details', '--usage', '--help', '-h'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -113,6 +113,80 @@ Please return a concise, targeted summary or extraction of the relevant parts th
 		return text || 'Could not summarize the tool output.';
 	} catch (err) {
 		return `Error running summarization sub-agent: ${err.message || err}`;
+	}
+}
+
+// Helper for background summarization process
+async function handleBackgroundSummarization(session_path) {
+	if (!fs.existsSync(session_path)) return;
+	let history = [];
+	let L_before = 0;
+	try {
+		history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+		L_before = history.length;
+	} catch (e) {
+		return;
+	}
+
+	if (!Array.isArray(history) || history.length === 0) return;
+
+	// Find the user prompt message indices (where role: 'user' and first part has text)
+	const promptIndices = [];
+	for (let i = 0; i < history.length; i++) {
+		const msg = history[i];
+		if (msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string') {
+			if (!msg.parts[0].text.startsWith('[System Memory:\n')) {
+				promptIndices.push(i);
+			}
+		}
+	}
+
+	// We keep the last 2 turns in full (Turn N-1 and Turn N)
+	// So we need at least 3 prompt messages to summarize (promptIndices.length >= 3)
+	if (promptIndices.length < 3) return;
+
+	const sliceIndex = promptIndices[promptIndices.length - 2];
+	const historyToSummarize = history.slice(0, sliceIndex);
+	const historyToKeep = history.slice(sliceIndex);
+
+	const summaryPrompt = `Extract the key facts from this conversation history. You must retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
+	const contents = [
+		...historyToSummarize,
+		{
+			role: 'user',
+			parts: [{ text: summaryPrompt }]
+		}
+	];
+
+	try {
+		const response = await ai.models.generateContent({
+			model: model_name,
+			contents: contents
+		});
+
+		const summary = response.candidates?.[0]?.content?.parts?.[0]?.text;
+		if (summary && fs.existsSync(session_path)) {
+			let currentHistory = [];
+			try {
+				currentHistory = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+			} catch (e) {
+				currentHistory = history;
+			}
+
+			if (Array.isArray(currentHistory)) {
+				// Any messages beyond L_before are new messages added since we started
+				const newMessages = currentHistory.slice(L_before);
+
+				const systemMemoryMsg = {
+					role: 'user',
+					parts: [{ text: `[System Memory:\n${summary.trim()}]` }]
+				};
+				const newHistory = [systemMemoryMsg, ...historyToKeep, ...newMessages];
+				fs.writeFileSync(session_path, JSON.stringify(newHistory, null, 2), 'utf8');
+			}
+		}
+	} catch (err) {
+		// Ignore / fail silently
 	}
 }
 
@@ -1358,6 +1432,20 @@ async function main() {
 		fs.mkdirSync(cache_dir, { recursive: true });
 	}
 
+	// Handle background summarization worker invocation
+	if (process.argv[2] === '--summarize-background') {
+		const session_path = process.argv[3];
+		if (session_path) {
+			try {
+				await handleBackgroundSummarization(session_path);
+			} catch (e) {
+				// Fail silently
+			}
+		}
+		process.exit(0);
+		return;
+	}
+
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
@@ -1835,6 +1923,48 @@ async function main() {
 	// Save final history state
 	pruneHistory(history);
 	fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+
+	// Check token count and prompt for background summarization if needed
+	try {
+		if (ai && process.stdin.isTTY) {
+			const tokenCountRes = await ai.models.countTokens({
+				model: model_name,
+				contents: history
+			});
+			const totalTokens = tokenCountRes.totalTokens || 0;
+
+			// Count user turns
+			const userTurns = history.filter(msg => 
+				msg && msg.role === 'user' && 
+				Array.isArray(msg.parts) && msg.parts[0] && 
+				typeof msg.parts[0].text === 'string' && 
+				!msg.parts[0].text.startsWith('[System Memory:\n')
+			).length;
+
+			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
+			const turn_limit = process.env.NONO_SUMMARIZE_TURN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TURN_LIMIT, 10) : 5;
+
+			if (totalTokens > token_limit && userTurns > turn_limit) {
+				console.log(`\n\x1b[33m⚡ Session history is growing large (${totalTokens} tokens, ${userTurns} turns).\x1b[0m`);
+				const answer = await askUser('Would you like to compress history in the background? [y/N]: ');
+				const norm = answer.trim().toLowerCase();
+				if (norm === 'y' || norm === 'yes') {
+					console.log('Spawning background summarization process...');
+					const child = spawn(process.execPath, [
+						fileURLToPath(import.meta.url),
+						'--summarize-background',
+						session_path
+					], {
+						detached: true,
+						stdio: 'ignore'
+					});
+					child.unref();
+				}
+			}
+		}
+	} catch (e) {
+		// Fail silently
+	}
 }
 
 main().catch(err => {
