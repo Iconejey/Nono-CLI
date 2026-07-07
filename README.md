@@ -92,7 +92,6 @@ Place these in your `.env` files (checked at `./.env`, the script directory's `.
 | `NONO_VOLUME`                 | Volume level for audio chime notifications (between `0` and `1`).             | `0.6`              |
 | `NONO_THEME`                  | Custom terminal syntax highlighting theme (JSON string or path to JSON file). | Hardcoded default  |
 | `NONO_SUMMARIZE_TOKEN_LIMIT`  | Token threshold before initiating background conversation summarization.      | `20000`            |
-| `NONO_SUMMARIZE_TURN_LIMIT`   | Conversation turn threshold before initiating background summarization.       | `5`                |
 | `NONO_PRICE_INPUT_EUR_PER_M`  | Custom input token price per million (for cost calculations).                 | `1.38`             |
 | `NONO_PRICE_OUTPUT_EUR_PER_M` | Custom output token price per million (for cost calculations).                | `8.28`             |
 | `NONO_PRICE_CACHE_EUR_PER_M`  | Custom cache read token price per million (for cost calculations).            | `0.138`            |

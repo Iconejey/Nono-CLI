@@ -1942,9 +1942,8 @@ async function main() {
 			).length;
 
 			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
-			const turn_limit = process.env.NONO_SUMMARIZE_TURN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TURN_LIMIT, 10) : 5;
 
-			if (totalTokens > token_limit && userTurns > turn_limit) {
+			if (totalTokens > token_limit && userTurns >= 3) {
 				console.log(`\n\x1b[33m⚡ Session history is growing large (${totalTokens} tokens, ${userTurns} turns).\x1b[0m`);
 				const answer = await askUser('Would you like to compress history in the background? [y/N]: ');
 				const norm = answer.trim().toLowerCase();
