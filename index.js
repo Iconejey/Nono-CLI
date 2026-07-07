@@ -1452,7 +1452,8 @@ async function main() {
 \x1b[35m✦ Nono - Ultra-efficient CLI AI Agent & Coding Workspace Specialist ✦\x1b[0m
 
 \x1b[1mUsage:\x1b[0m
-  nono [prompt]              Start Nono in interactive mode or run a prompt directly
+  nono                       Start Nono in interactive mode
+  nono [prompt]              Run a prompt directly from the command line
   nono --usage               Display token consumption and estimated costs
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
@@ -2017,8 +2018,7 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 
 	// If no arguments, prompt interactively
 	if (!user_query.trim()) {
-		console.log('\x1b[32mNono Workspace Specialist\x1b[0m');
-		user_query = await askUser('How can I help you today? ');
+		user_query = await askUser('\x1b[35m> \x1b[0m');
 		if (!user_query.trim()) {
 			console.log('No prompt provided. Exiting.');
 			process.exit(0);
