@@ -1500,6 +1500,7 @@ async function main() {
 \x1b[1mUsage:\x1b[0m
   nono                       Start Nono in interactive mode
   nono [prompt]              Run a prompt directly from the command line
+  nono --full, -f            Open a temp file in vim to write a prompt
   nono --usage               Display token consumption and estimated costs
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
@@ -2060,14 +2061,99 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 	}
 
 	// Capture CLI arguments
-	let user_query = process.argv.slice(2).join(' ');
+	let user_query = '';
 
-	// If no arguments, prompt interactively
-	if (!user_query.trim()) {
-		user_query = await askUser('\x1b[35m> \x1b[0m', false);
+	if (process.argv[2] === '--full' || process.argv[2] === '-f') {
+		const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
+		try {
+			fs.writeFileSync(tempPath, '', 'utf8');
+			await new Promise((resolve, reject) => {
+				const editors = [];
+				if (process.env.VISUAL) editors.push(process.env.VISUAL);
+				if (process.env.EDITOR) editors.push(process.env.EDITOR);
+				for (const fallback of ['vim', 'vi', 'nano']) {
+					if (!editors.includes(fallback)) {
+						editors.push(fallback);
+					}
+				}
+
+				let editorIndex = 0;
+
+				function trySpawn() {
+					if (editorIndex >= editors.length) {
+						reject(new Error(`None of the editors (${editors.join(', ')}) could be started.`));
+						return;
+					}
+
+					const editor = editors[editorIndex];
+					const parts = editor.trim().split(/\s+/);
+					const cmd = parts[0];
+					const args = [...parts.slice(1), tempPath];
+
+					const child = spawn(cmd, args, { stdio: 'inherit' });
+					let completed = false;
+
+					child.on('error', err => {
+						if (completed) return;
+						completed = true;
+						if (err.code === 'ENOENT') {
+							editorIndex++;
+							trySpawn();
+						} else {
+							reject(err);
+						}
+					});
+
+					child.on('close', code => {
+						if (completed) return;
+						completed = true;
+						if (code === 0) {
+							resolve();
+						} else if (code === 127) {
+							editorIndex++;
+							trySpawn();
+						} else {
+							reject(new Error(`Editor (${cmd}) exited with code ${code}`));
+						}
+					});
+				}
+
+				trySpawn();
+			});
+			if (fs.existsSync(tempPath)) {
+				user_query = fs.readFileSync(tempPath, 'utf8');
+				try {
+					fs.unlinkSync(tempPath);
+				} catch (e) {
+					// Ignore cleanup errors
+				}
+			}
+		} catch (err) {
+			try {
+				if (fs.existsSync(tempPath)) {
+					fs.unlinkSync(tempPath);
+				}
+			} catch (e) {
+				// Ignore cleanup errors
+			}
+			console.error(`\x1b[31mError opening/reading temp file in editor: ${err.message}\x1b[0m`);
+			process.exit(1);
+		}
+
 		if (!user_query.trim()) {
 			console.log('No prompt provided. Exiting.');
 			process.exit(0);
+		}
+	} else {
+		user_query = process.argv.slice(2).join(' ');
+
+		// If no arguments, prompt interactively
+		if (!user_query.trim()) {
+			user_query = await askUser('\x1b[35m> \x1b[0m', false);
+			if (!user_query.trim()) {
+				console.log('No prompt provided. Exiting.');
+				process.exit(0);
+			}
 		}
 	}
 

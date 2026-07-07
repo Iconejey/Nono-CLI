@@ -81,6 +81,11 @@ nono --clear
 # Fetch latest pricing for the active model online and update configuration
 nono --get-pricing
 
+# Open a temp file in your text editor to write a prompt and execute it on save and exit
+nono --full
+# Or using the shorthand flag
+nono -f
+
 # Show CLI options
 nono --help
 ```
