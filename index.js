@@ -24,7 +24,7 @@ const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 
-if (!api_key && process.argv[2] !== '--details' && process.argv[2] !== '--test-audio') {
+if (!api_key && !['--details', '--usage', '--help', '-h'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -1225,8 +1225,6 @@ async function main() {
   nono --usage               Display token consumption and estimated costs
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
-  nono --test-audio          Run diagnostic checks for audio feedback / chime sounds
-  nono --test-format         Run a markdown formatting and terminal rendering test
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -1399,60 +1397,7 @@ async function main() {
 		}
 	}
 
-	// Handle nono --test-audio argument
-	if (process.argv[2] === '--test-audio') {
-		const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-		console.log(`\n\x1b[35m=== Nono Audio Diagnostics ===\x1b[0m`);
-		console.log(`Current Volume Level: ${Math.round(volume_scale * 100)}%\n`);
-
-		console.log(`• Playing: User Interaction Needed Chime`);
-		console.log(`  \x1b[90mMeaning: Played when Nono asks a question or requires sudo credential authentication.\x1b[0m`);
-		playChime('user_interaction_needed');
-		await sleep(1500);
-
-		console.log(`• Playing: Success Chime`);
-		console.log(`  \x1b[90mMeaning: Played at the end of a task when Nono finishes successfully.\x1b[0m`);
-		playChime('complete');
-		await sleep(1500);
-
-		console.log(`• Playing: Error Chime`);
-		console.log(`  \x1b[90mMeaning: Played when a task fails or a dry-run check throws errors.\x1b[0m`);
-		playChime('error');
-		await sleep(1500);
-
-		console.log(`\n\x1b[32m✔ Audio diagnostics complete!\x1b[0m\n`);
-		process.exit(0);
-		return;
-	}
-
-	// Handle nono --test-format argument
-	if (process.argv[2] === '--test-format') {
-		const test_markdown = `### System Status & Sudo Verification
-Here is the diagnostics output from the elevated test environment:
-
-- **Command executed**: \`sudo systemctl status fprintd\`
-- **Status**: \`active (running)\`
-- **Elapsed execution time**: 4s
-
-### Security & Access Policy
-1. **Passwordless Access**: Active.
-2. **Elevated Privileges**: Fully verified.
-
-Here is the raw system logs payload:
-\`\`\`text
-Jun 29 00:34:40 host systemd[1]: Starting Fingerprint Authentication Daemon...
-Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
-\`\`\`
-
-*Note: Please ensure the PAM module rules are kept aligned with the security constraints.*`;
-
-		console.log(`\n\x1b[35m=== Nono Markdown Formatting Test ===\x1b[0m\n`);
-		console.log(`\x1b[35m✦\x1b[0m ${await formatMarkdownForTerminal(test_markdown)}`);
-		console.log();
-		process.exit(0);
-		return;
-	}
 
 	// Capture CLI arguments
 	let user_query = process.argv.slice(2).join(' ');
