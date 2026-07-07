@@ -1891,7 +1891,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 
 		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
-		console.log('• Cleaning up previous PR review reports...');
+		updateProgress('• Cleaning up previous PR review reports...');
 
 		// Cleanup previous reviews
 		if (fs.existsSync(cache_dir)) {
@@ -1923,20 +1923,20 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 
 		try {
-			console.log('• Fetching pull request details from GitHub...');
+			updateProgress('• Fetching pull request details from GitHub...');
 			const prData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`);
 			const prTitle = prData.title;
 			const prAuthor = prData.user.login;
 
-			console.log('• Fetching list of changed files and diffs...');
+			updateProgress('• Fetching list of changed files and diffs...');
 			const filesData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/files`);
 
-			console.log(`• Analyzing changes in ${filesData.length} file(s)...`);
+			updateProgress(`• Analyzing changes in ${filesData.length} file(s)...`);
 			for (const file of filesData) {
-				console.log(`  - Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
+				updateProgress(`  - Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
 			}
 
-			console.log('• Generating final PR review report with Gemini...');
+			updateProgress('• Generating final PR review report with Gemini...');
 			const prompt = `You are an expert code reviewer. Perform a detailed pull request review for the following Github Pull Request:
 
 Pull Request: ${owner}/${repo}#${pullNumber}
@@ -1990,10 +1990,10 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 			const reportFilename = `pr-review-${safeOwner}-${safeRepo}-${pullNumber}.md`;
 			const reportPath = path.join(cache_dir, reportFilename);
 
-			console.log(`• Saving report to: ${reportPath}`);
+			updateProgress(`• Saving report to: ${reportPath}`);
 			fs.writeFileSync(reportPath, reportContent, 'utf8');
 
-			console.log('• Opening report in VS Code...');
+			updateProgress('• Opening report in VS Code...');
 			playChime('complete');
 
 			exec(`code ${JSON.stringify(reportPath)}`, error => {
