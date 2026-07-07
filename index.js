@@ -52,7 +52,7 @@ function pruneHistory(history) {
 			for (const part of message.parts) {
 				if (part && part.functionResponse && part.functionResponse.response) {
 					const response = part.functionResponse.response;
-					
+
 					// Truncate view_file_contents
 					if (part.functionResponse.name === 'view_file_contents' && typeof response.content === 'string') {
 						if (response.content.length > 1000) {
@@ -1457,6 +1457,7 @@ async function main() {
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
+  nono pr-review [url]       Run a GitHub PR review on the specified PR URL
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -1466,7 +1467,7 @@ async function main() {
 	// Handle nono --get-pricing command
 	if (process.argv[2] === '--get-pricing') {
 		console.log('\x1b[35m✦ Fetching current pricing and country information... ✦\x1b[0m\n');
-		
+
 		const countryName = process.env.NONO_COUNTRY || 'France';
 
 		console.log(`Current Model: \x1b[36m${model_name}\x1b[0m`);
@@ -1503,7 +1504,10 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 			let text = pricingResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
 			// Clean up potential markdown code blocks
-			text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+			text = text
+				.replace(/```json/gi, '')
+				.replace(/```/g, '')
+				.trim();
 
 			let newPricing;
 			try {
@@ -1535,7 +1539,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			console.log('\n\x1b[35m=== Pricing Comparison (per 1 Million Tokens) ===\x1b[0m');
 			console.log(`Token Type          │ Current Price │ New Found Price`);
 			console.log(`────────────────────┼───────────────┼─────────────────`);
-			
+
 			const pad = (str, length) => str + ' '.repeat(Math.max(0, length - String(str).length));
 			const padLeft = (str, length) => ' '.repeat(Math.max(0, length - String(str).length)) + str;
 
@@ -1570,16 +1574,12 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 				const lines = envContent.split(/\r?\n/);
 				const keysToUpdate = {
-					'NONO_PRICE_INPUT_PER_M': newPriceInput.toString(),
-					'NONO_PRICE_OUTPUT_PER_M': newPriceOutput.toString(),
-					'NONO_PRICE_CACHE_PER_M': newPriceCache.toString()
+					NONO_PRICE_INPUT_PER_M: newPriceInput.toString(),
+					NONO_PRICE_OUTPUT_PER_M: newPriceOutput.toString(),
+					NONO_PRICE_CACHE_PER_M: newPriceCache.toString()
 				};
 
-				const keysToRemove = [
-					'NONO_PRICE_INPUT_EUR_PER_M',
-					'NONO_PRICE_OUTPUT_EUR_PER_M',
-					'NONO_PRICE_CACHE_EUR_PER_M'
-				];
+				const keysToRemove = ['NONO_PRICE_INPUT_EUR_PER_M', 'NONO_PRICE_OUTPUT_EUR_PER_M', 'NONO_PRICE_CACHE_EUR_PER_M'];
 
 				let updatedLines = [];
 				const processedKeys = new Set();
@@ -1748,36 +1748,24 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		// 1. Session Consumption Table
 		// ----------------------------------------------------
 		console.log(`\x1b[1;35m✦ Session Consumption (PPID: ${process.ppid})\x1b[0m`);
-		
+
 		const headers1 = ['Token Type', 'Price / 1M', 'Tokens', 'Estimated Cost'];
 		const colWidths1 = [20, 12, 14, 16];
 
 		// Print Headers
-		const headerStr1 = 
-			pad(headers1[0], colWidths1[0], 'left') + ' │ ' +
-			pad(headers1[1], colWidths1[1], 'right') + ' │ ' +
-			pad(headers1[2], colWidths1[2], 'right') + ' │ ' +
-			pad(headers1[3], colWidths1[3], 'right');
+		const headerStr1 = pad(headers1[0], colWidths1[0], 'left') + ' │ ' + pad(headers1[1], colWidths1[1], 'right') + ' │ ' + pad(headers1[2], colWidths1[2], 'right') + ' │ ' + pad(headers1[3], colWidths1[3], 'right');
 		console.log(`\x1b[1;37m${headerStr1}\x1b[0m`);
 
 		// Print Separator
-		const separator1 = 
-			'─'.repeat(colWidths1[0]) + '─┼─' +
-			'─'.repeat(colWidths1[1]) + '─┼─' +
-			'─'.repeat(colWidths1[2]) + '─┼─' +
-			'─'.repeat(colWidths1[3]);
+		const separator1 = '─'.repeat(colWidths1[0]) + '─┼─' + '─'.repeat(colWidths1[1]) + '─┼─' + '─'.repeat(colWidths1[2]) + '─┼─' + '─'.repeat(colWidths1[3]);
 		console.log(`\x1b[90m${separator1}\x1b[0m`);
 
 		const printRow1 = (label, priceStr, tokens, cost) => {
 			const formattedTokens = tokens.toLocaleString();
 			const formattedCost = label === 'Total' ? `${cost.toFixed(2)}${currency}` : `${cost.toFixed(2)}${currency}`;
-			
-			const line = 
-				pad(label, colWidths1[0], 'left') + ' │ ' +
-				pad(priceStr, colWidths1[1], 'right') + ' │ ' +
-				pad(formattedTokens, colWidths1[2], 'right') + ' │ ' +
-				pad(formattedCost, colWidths1[3], 'right');
-			
+
+			const line = pad(label, colWidths1[0], 'left') + ' │ ' + pad(priceStr, colWidths1[1], 'right') + ' │ ' + pad(formattedTokens, colWidths1[2], 'right') + ' │ ' + pad(formattedCost, colWidths1[3], 'right');
+
 			if (label === 'Total') {
 				console.log(`\x1b[1m${line}\x1b[0m`);
 			} else {
@@ -1788,7 +1776,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		printRow1('Input (non-cached)', `${priceInput.toFixed(2)}${currency}`, sessionInput, sessionCostInput);
 		printRow1('Cache Hit', `${priceCache.toFixed(2)}${currency}`, sessionCache, sessionCostCache);
 		printRow1('Output', `${priceOutput.toFixed(2)}${currency}`, sessionOutput, sessionCostOutput);
-		
+
 		console.log(`\x1b[90m${separator1}\x1b[0m`);
 		printRow1('Total', '-', sessionTotalTokens, sessionTotalCost);
 		console.log();
@@ -1796,10 +1784,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		// ----------------------------------------------------
 		// 2. Monthly Consumption & Projections Table
 		// ----------------------------------------------------
-		const monthsList = [
-			'January', 'February', 'March', 'April', 'May', 'June',
-			'July', 'August', 'September', 'October', 'November', 'December'
-		];
+		const monthsList = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 		const monthName = monthsList[month];
 
 		console.log(`\x1b[1;35m✦ Monthly Consumption & Projections (${monthName} ${year})\x1b[0m`);
@@ -1808,21 +1793,20 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		const colWidths2 = [20, 12, 14, 12, 16];
 
 		// Print Headers
-		const headerStr2 = 
-			pad(headers2[0], colWidths2[0], 'left') + ' │ ' +
-			pad(headers2[1], colWidths2[1], 'right') + ' │ ' +
-			pad(headers2[2], colWidths2[2], 'right') + ' │ ' +
-			pad(headers2[3], colWidths2[3], 'right') + ' │ ' +
+		const headerStr2 =
+			pad(headers2[0], colWidths2[0], 'left') +
+			' │ ' +
+			pad(headers2[1], colWidths2[1], 'right') +
+			' │ ' +
+			pad(headers2[2], colWidths2[2], 'right') +
+			' │ ' +
+			pad(headers2[3], colWidths2[3], 'right') +
+			' │ ' +
 			pad(headers2[4], colWidths2[4], 'right');
 		console.log(`\x1b[1;37m${headerStr2}\x1b[0m`);
 
 		// Print Separator
-		const separator2 = 
-			'─'.repeat(colWidths2[0]) + '─┼─' +
-			'─'.repeat(colWidths2[1]) + '─┼─' +
-			'─'.repeat(colWidths2[2]) + '─┼─' +
-			'─'.repeat(colWidths2[3]) + '─┼─' +
-			'─'.repeat(colWidths2[4]);
+		const separator2 = '─'.repeat(colWidths2[0]) + '─┼─' + '─'.repeat(colWidths2[1]) + '─┼─' + '─'.repeat(colWidths2[2]) + '─┼─' + '─'.repeat(colWidths2[3]) + '─┼─' + '─'.repeat(colWidths2[4]);
 		console.log(`\x1b[90m${separator2}\x1b[0m`);
 
 		const printRow2 = (label, priceStr, tokens, cost, projectedCost) => {
@@ -1830,11 +1814,15 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			const formattedCost = `${cost.toFixed(2)}${currency}`;
 			const formattedProjected = `${projectedCost.toFixed(2)}${currency}`;
 
-			const line = 
-				pad(label, colWidths2[0], 'left') + ' │ ' +
-				pad(priceStr, colWidths2[1], 'right') + ' │ ' +
-				pad(formattedTokens, colWidths2[2], 'right') + ' │ ' +
-				pad(formattedCost, colWidths2[3], 'right') + ' │ ' +
+			const line =
+				pad(label, colWidths2[0], 'left') +
+				' │ ' +
+				pad(priceStr, colWidths2[1], 'right') +
+				' │ ' +
+				pad(formattedTokens, colWidths2[2], 'right') +
+				' │ ' +
+				pad(formattedCost, colWidths2[3], 'right') +
+				' │ ' +
 				pad(formattedProjected, colWidths2[4], 'right');
 
 			if (label === 'Total') {
@@ -1874,7 +1862,155 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 	}
 
+	// Handle nono pr-review <pr-url> command
+	if (process.argv[2] === 'pr-review') {
+		const prUrl = process.argv[3];
+		if (!prUrl) {
+			console.error('\x1b[31mError: Pull request URL is required.\x1b[0m');
+			console.error('Usage: nono pr-review <github-pr-url>');
+			playChime('error');
+			process.exit(1);
+		}
 
+		const match = prUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
+		if (!match) {
+			console.error('\x1b[31mError: Invalid Github Pull Request URL.\x1b[0m');
+			console.error('Expected format: https://github.com/owner/repo/pull/number');
+			playChime('error');
+			process.exit(1);
+		}
+
+		const [_, owner, repo, pullNumber] = match;
+
+		const githubToken = process.env.GITHUB_ACCESS_TOKEN;
+		if (!githubToken) {
+			console.error('\x1b[31mError: GITHUB_ACCESS_TOKEN is not set.\x1b[0m');
+			console.error('Please configure GITHUB_ACCESS_TOKEN in your .env file.');
+			playChime('error');
+			process.exit(1);
+		}
+
+		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
+		console.log('• Cleaning up previous PR review reports...');
+
+		// Cleanup previous reviews
+		if (fs.existsSync(cache_dir)) {
+			const files = fs.readdirSync(cache_dir);
+			for (const file of files) {
+				if (file.startsWith('pr-review-') && file.endsWith('.md')) {
+					try {
+						fs.unlinkSync(path.join(cache_dir, file));
+					} catch (e) {
+						// ignore
+					}
+				}
+			}
+		}
+
+		async function githubFetch(url) {
+			const response = await fetch(url, {
+				headers: {
+					Accept: 'application/vnd.github+json',
+					Authorization: `Bearer ${githubToken}`,
+					'X-GitHub-Api-Version': '2022-11-28',
+					'User-Agent': 'Nono-CLI'
+				}
+			});
+			if (!response.ok) {
+				throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`);
+			}
+			return response.json();
+		}
+
+		try {
+			console.log('• Fetching pull request details from GitHub...');
+			const prData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`);
+			const prTitle = prData.title;
+			const prAuthor = prData.user.login;
+
+			console.log('• Fetching list of changed files and diffs...');
+			const filesData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/files`);
+
+			console.log(`• Analyzing changes in ${filesData.length} file(s)...`);
+			for (const file of filesData) {
+				console.log(`  - Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
+			}
+
+			console.log('• Generating final PR review report with Gemini...');
+			const prompt = `You are an expert code reviewer. Perform a detailed pull request review for the following Github Pull Request:
+
+Pull Request: ${owner}/${repo}#${pullNumber}
+Title: ${prTitle}
+Author: ${prAuthor}
+
+Here is the list of changed files and their diffs:
+
+${filesData
+	.map(
+		(file, index) => `
+---
+File: ${file.filename}
+Status: ${file.status}
+Additions: ${file.additions}, Deletions: ${file.deletions}
+Diff:
+\`\`\`diff
+${file.patch || '(No patch available or binary file)'}
+\`\`\`
+`
+	)
+	.join('\n')}
+
+Please analyze the diffs to identify potential issues, code smells, or areas for improvement.
+Identify:
+1. Code that does not follow best practices.
+2. Potential bugs or vulnerabilities.
+3. Suggestions for improvements in code structure or readability.
+
+Generate a comprehensive PR review report in Markdown format. The report MUST include:
+- A title: "# Github PR Review: ${prTitle} (#${pullNumber})"
+- Summary of the PR (title, author, number of files changed).
+- List of files changed with a brief description of the changes.
+- Detailed analysis for each file, including identified issues and suggestions for improvement. If a file has no issues, explicitly state that it looks good.
+
+Return ONLY the markdown content. Do not wrap the response in markdown code blocks like \`\`\`markdown.`;
+
+			const response = await ai.models.generateContent({
+				model: model_name,
+				contents: [{ role: 'user', parts: [{ text: prompt }] }]
+			});
+
+			if (response.usageMetadata) {
+				logTokenUsage(model_name, response.usageMetadata);
+			}
+
+			const reportContent = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+			const safeOwner = owner.replace(/[^a-zA-Z0-9_-]/g, '_');
+			const safeRepo = repo.replace(/[^a-zA-Z0-9_-]/g, '_');
+			const reportFilename = `pr-review-${safeOwner}-${safeRepo}-${pullNumber}.md`;
+			const reportPath = path.join(cache_dir, reportFilename);
+
+			console.log(`• Saving report to: ${reportPath}`);
+			fs.writeFileSync(reportPath, reportContent, 'utf8');
+
+			console.log('• Opening report in VS Code...');
+			playChime('complete');
+
+			exec(`code ${JSON.stringify(reportPath)}`, error => {
+				if (error) {
+					console.error(`Failed to open VS Code: ${error.message}`);
+					process.exit(1);
+				}
+				console.log('\x1b[32m✔ PR review completed and opened in VS Code!\x1b[0m');
+				process.exit(0);
+			});
+		} catch (err) {
+			console.error(`\x1b[31mError during PR review: ${err.message || err}\x1b[0m`);
+			playChime('error');
+			process.exit(1);
+		}
+		return;
+	}
 
 	// Capture CLI arguments
 	let user_query = process.argv.slice(2).join(' ');
@@ -1969,11 +2105,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 						const summary = await runSummarizationSubAgent(trigger.originalResult, query);
 						writeDetails(`[Summarizer Trigger] Summary generated for ${trigger.name}:\n${summary}`);
 
-						const matching_part = last_user_msg.parts.find(p => 
-							p.functionResponse && 
-							p.functionResponse.name === trigger.name && 
-							(!trigger.callId || p.functionResponse.id === trigger.callId)
-						);
+						const matching_part = last_user_msg.parts.find(p => p.functionResponse && p.functionResponse.name === trigger.name && (!trigger.callId || p.functionResponse.id === trigger.callId));
 						if (matching_part) {
 							matching_part.functionResponse.response = {
 								status: 'success',
@@ -2099,12 +2231,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			const totalTokens = tokenCountRes.totalTokens || 0;
 
 			// Count user turns
-			const userTurns = history.filter(msg => 
-				msg && msg.role === 'user' && 
-				Array.isArray(msg.parts) && msg.parts[0] && 
-				typeof msg.parts[0].text === 'string' && 
-				!msg.parts[0].text.startsWith('[System Memory:\n')
-			).length;
+			const userTurns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
 
 			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
 
@@ -2114,11 +2241,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				const norm = answer.trim().toLowerCase();
 				if (norm === 'y' || norm === 'yes') {
 					console.log('Spawning background summarization process...');
-					const child = spawn(process.execPath, [
-						fileURLToPath(import.meta.url),
-						'--summarize-background',
-						session_path
-					], {
+					const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--summarize-background', session_path], {
 						detached: true,
 						stdio: 'ignore'
 					});
