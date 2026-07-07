@@ -1456,8 +1456,172 @@ async function main() {
   nono --usage               Display token consumption and estimated costs
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
+  nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --help, -h            Show this help information
 `);
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --get-pricing command
+	if (process.argv[2] === '--get-pricing') {
+		console.log('\x1b[35m✦ Fetching current pricing and country information... ✦\x1b[0m\n');
+		
+		const countryName = process.env.NONO_COUNTRY || 'France';
+
+		console.log(`Current Model: \x1b[36m${model_name}\x1b[0m`);
+		console.log(`Current Location: \x1b[36m${countryName}\x1b[0m`);
+		const currency = process.env.NONO_CURRENCY || '€';
+		console.log(`Currency: \x1b[36m${currency}\x1b[0m\n`);
+
+		console.log('• Querying Gemini API pricing details via Google Search...');
+
+		const pricingPrompt = `Use Google Search to find the latest developer pricing for the Gemini API model "${model_name}" (specifically input tokens, output tokens, and cached input tokens) ${countryName ? `for users in ${countryName}` : ''} in the currency "${currency}".
+
+Search for the official Google AI Studio/Gemini API pricing. Find:
+1. Input token price (per 1 million tokens)
+2. Output token price (per 1 million tokens)
+3. Cached input token price (per 1 million tokens)
+
+If the pricing is only listed in USD, convert it to ${currency} using the current exchange rate.
+
+Return ONLY a JSON object. Do not include markdown code block formatting (like \`\`\`json). The JSON object MUST have the following structure:
+{
+  "input_price_per_m": <number>,
+  "output_price_per_m": <number>,
+  "cache_price_per_m": <number>
+}`;
+
+		try {
+			const pricingResponse = await ai.models.generateContent({
+				model: model_name,
+				contents: [{ role: 'user', parts: [{ text: pricingPrompt }] }],
+				config: {
+					tools: [{ googleSearch: {} }]
+				}
+			});
+
+			let text = pricingResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
+			// Clean up potential markdown code blocks
+			text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+			let newPricing;
+			try {
+				newPricing = JSON.parse(text);
+			} catch (parseErr) {
+				console.error('\x1b[31mError: Failed to parse pricing response from Gemini.\x1b[0m');
+				console.log('Raw response:');
+				console.log(text);
+				process.exit(1);
+			}
+
+			// Validate response fields
+			const newPriceInput = parseFloat(newPricing.input_price_per_m);
+			const newPriceOutput = parseFloat(newPricing.output_price_per_m);
+			const newPriceCache = parseFloat(newPricing.cache_price_per_m);
+
+			if (isNaN(newPriceInput) || isNaN(newPriceOutput) || isNaN(newPriceCache)) {
+				console.error('\x1b[31mError: Pricing response did not return valid numeric values.\x1b[0m');
+				console.log(JSON.stringify(newPricing, null, 2));
+				process.exit(1);
+			}
+
+			// Current pricing from env (or fallbacks)
+			const currentPriceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
+			const currentPriceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
+			const currentPriceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
+
+			// Compare in a table
+			console.log('\n\x1b[35m=== Pricing Comparison (per 1 Million Tokens) ===\x1b[0m');
+			console.log(`Token Type          │ Current Price │ New Found Price`);
+			console.log(`────────────────────┼───────────────┼─────────────────`);
+			
+			const pad = (str, length) => str + ' '.repeat(Math.max(0, length - String(str).length));
+			const padLeft = (str, length) => ' '.repeat(Math.max(0, length - String(str).length)) + str;
+
+			console.log(`${pad('Input (non-cached)', 19)} │ ${padLeft(`${currentPriceInput.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceInput.toFixed(2)}${currency}`, 15)}`);
+			console.log(`${pad('Cache Hit', 19)} │ ${padLeft(`${currentPriceCache.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceCache.toFixed(2)}${currency}`, 15)}`);
+			console.log(`${pad('Output', 19)} │ ${padLeft(`${currentPriceOutput.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceOutput.toFixed(2)}${currency}`, 15)}`);
+			console.log(`────────────────────┴───────────────┴─────────────────`);
+
+			// Prompt the user
+			const answer = await askUser('\nDo you want to update the pricing values? [y/N]: ');
+			const norm = answer.trim().toLowerCase();
+			if (norm === 'y' || norm === 'yes') {
+				const localEnvPath = path.join(process.cwd(), '.env');
+				const configEnvPath = path.join(os.homedir(), '.config', 'nono', '.env');
+				const scriptEnvPath = path.join(dir_name, '.env');
+
+				let targetEnvPath = '';
+				if (fs.existsSync(localEnvPath)) {
+					targetEnvPath = localEnvPath;
+				} else if (fs.existsSync(configEnvPath)) {
+					targetEnvPath = configEnvPath;
+				} else {
+					targetEnvPath = scriptEnvPath;
+				}
+
+				console.log(`Updating configuration in: ${targetEnvPath}...`);
+
+				let envContent = '';
+				if (fs.existsSync(targetEnvPath)) {
+					envContent = fs.readFileSync(targetEnvPath, 'utf8');
+				}
+
+				const lines = envContent.split(/\r?\n/);
+				const keysToUpdate = {
+					'NONO_PRICE_INPUT_PER_M': newPriceInput.toString(),
+					'NONO_PRICE_OUTPUT_PER_M': newPriceOutput.toString(),
+					'NONO_PRICE_CACHE_PER_M': newPriceCache.toString()
+				};
+
+				const keysToRemove = [
+					'NONO_PRICE_INPUT_EUR_PER_M',
+					'NONO_PRICE_OUTPUT_EUR_PER_M',
+					'NONO_PRICE_CACHE_EUR_PER_M'
+				];
+
+				let updatedLines = [];
+				const processedKeys = new Set();
+
+				for (let line of lines) {
+					const trimmed = line.trim();
+					if (trimmed.startsWith('#') || trimmed === '') {
+						updatedLines.push(line);
+						continue;
+					}
+					const eqIdx = trimmed.indexOf('=');
+					if (eqIdx !== -1) {
+						const key = trimmed.slice(0, eqIdx).trim();
+						if (keysToRemove.includes(key)) {
+							continue;
+						}
+						if (keysToUpdate[key] !== undefined) {
+							updatedLines.push(`${key}=${keysToUpdate[key]}`);
+							processedKeys.add(key);
+						} else {
+							updatedLines.push(line);
+						}
+					} else {
+						updatedLines.push(line);
+					}
+				}
+
+				for (const [key, val] of Object.entries(keysToUpdate)) {
+					if (!processedKeys.has(key)) {
+						updatedLines.push(`${key}=${val}`);
+					}
+				}
+
+				fs.writeFileSync(targetEnvPath, updatedLines.join('\n'), 'utf8');
+				console.log('\x1b[32m✔ Pricing values updated successfully in .env file!\x1b[0m\n');
+			} else {
+				console.log('Update cancelled. Pricing kept unchanged.');
+			}
+		} catch (err) {
+			console.error(`\x1b[31mError during pricing lookup: ${err.message || err}\x1b[0m`);
+			process.exit(1);
+		}
 		process.exit(0);
 		return;
 	}

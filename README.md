@@ -73,6 +73,9 @@ nono --usage
 # Clear the current terminal session history and reset the agent
 nono --clear
 
+# Fetch latest pricing for the active model online and update configuration
+nono --get-pricing
+
 # Show CLI options
 nono --help
 ```
@@ -93,6 +96,7 @@ Place these in your `.env` files (checked at `./.env`, the script directory's `.
 | `NONO_THEME`                  | Custom terminal syntax highlighting theme (JSON string or path to JSON file). | Hardcoded default  |
 | `NONO_SUMMARIZE_TOKEN_LIMIT`  | Token threshold before initiating background conversation summarization.      | `20000`            |
 | `NONO_CURRENCY`               | Currency symbol or code displayed in consumption auditing tables.             | `€`                |
+| `NONO_COUNTRY`                | Country name context used for online model pricing lookup.                    | `France`           |
 | `NONO_PRICE_INPUT_PER_M`      | Custom input token price per million (for cost calculations).                 | `1.38`             |
 | `NONO_PRICE_OUTPUT_PER_M`     | Custom output token price per million (for cost calculations).                | `8.28`             |
 | `NONO_PRICE_CACHE_PER_M`      | Custom cache read token price per million (for cost calculations).            | `0.138`            |
