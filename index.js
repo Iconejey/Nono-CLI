@@ -1205,6 +1205,38 @@ Guidelines:
 - Always specify the language name (e.g., \`\`\`javascript, \`\`\`python, \`\`\`bash) when writing a markdown code block to ensure proper terminal syntax highlighting.
 `;
 
+// Helper to log token consumption metrics
+function logTokenUsage(model, usageMetadata) {
+	if (!usageMetadata) return;
+	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
+	if (!fs.existsSync(cache_dir)) {
+		fs.mkdirSync(cache_dir, { recursive: true });
+	}
+	const log_file = path.join(cache_dir, 'consumption.json');
+	let logs = [];
+	if (fs.existsSync(log_file)) {
+		try {
+			logs = JSON.parse(fs.readFileSync(log_file, 'utf8'));
+		} catch (e) {
+			// ignore corrupt file
+		}
+	}
+	const record = {
+		timestamp: new Date().toISOString(),
+		ppid: process.ppid,
+		model: model,
+		promptTokenCount: usageMetadata.promptTokenCount || 0,
+		candidatesTokenCount: usageMetadata.candidatesTokenCount || 0,
+		cachedContentTokenCount: usageMetadata.cachedContentTokenCount || 0
+	};
+	logs.push(record);
+	try {
+		fs.writeFileSync(log_file, JSON.stringify(logs, null, 2), 'utf8');
+	} catch (e) {
+		// ignore write error
+	}
+}
+
 // ----------------------------------------------------
 // Main Agentic Loop Orchestrator
 // ----------------------------------------------------
@@ -1316,65 +1348,146 @@ async function main() {
 			}
 		}
 
+		// Helper to pad strings for alignment
+		const pad = (str, length, align = 'left') => {
+			str = String(str);
+			if (str.length >= length) return str;
+			const diff = length - str.length;
+			if (align === 'right') {
+				return ' '.repeat(diff) + str;
+			}
+			return str + ' '.repeat(diff);
+		};
+
 		const sessionCostInput = (sessionInput * priceInput) / 1000000;
 		const sessionCostCache = (sessionCache * priceCache) / 1000000;
 		const sessionCostOutput = (sessionOutput * priceOutput) / 1000000;
 		const sessionTotalCost = sessionCostInput + sessionCostCache + sessionCostOutput;
+		const sessionTotalTokens = sessionInput + sessionCache + sessionOutput;
 
 		const monthCostInput = (monthInput * priceInput) / 1000000;
 		const monthCostCache = (monthCache * priceCache) / 1000000;
 		const monthCostOutput = (monthOutput * priceOutput) / 1000000;
 		const monthTotalCost = monthCostInput + monthCostCache + monthCostOutput;
+		const monthTotalTokens = monthInput + monthCache + monthOutput;
 
 		const projectedCostInput = monthCostInput / elapsedFraction;
 		const projectedCostCache = monthCostCache / elapsedFraction;
 		const projectedCostOutput = monthCostOutput / elapsedFraction;
 		const projectedTotalCost = monthTotalCost / elapsedFraction;
 
-		const tableData = [
-			{
-				'Token Type': 'Input (non-cached)',
-				'Price / 1M': `€${priceInput.toFixed(3)}`,
-				'Session Tokens': sessionInput.toLocaleString(),
-				'Session Cost': `€${sessionCostInput.toFixed(6)}`,
-				'Month Tokens': monthInput.toLocaleString(),
-				'Month Cost': `€${monthCostInput.toFixed(6)}`,
-				'Projected Month Cost': `€${projectedCostInput.toFixed(6)}`
-			},
-			{
-				'Token Type': 'Cache Hit',
-				'Price / 1M': `€${priceCache.toFixed(3)}`,
-				'Session Tokens': sessionCache.toLocaleString(),
-				'Session Cost': `€${sessionCostCache.toFixed(6)}`,
-				'Month Tokens': monthCache.toLocaleString(),
-				'Month Cost': `€${monthCostCache.toFixed(6)}`,
-				'Projected Month Cost': `€${projectedCostCache.toFixed(6)}`
-			},
-			{
-				'Token Type': 'Output',
-				'Price / 1M': `€${priceOutput.toFixed(3)}`,
-				'Session Tokens': sessionOutput.toLocaleString(),
-				'Session Cost': `€${sessionCostOutput.toFixed(6)}`,
-				'Month Tokens': monthOutput.toLocaleString(),
-				'Month Cost': `€${monthCostOutput.toFixed(6)}`,
-				'Projected Month Cost': `€${projectedCostOutput.toFixed(6)}`
-			},
-			{
-				'Token Type': 'Total',
-				'Price / 1M': '-',
-				'Session Tokens': (sessionInput + sessionCache + sessionOutput).toLocaleString(),
-				'Session Cost': `€${sessionTotalCost.toFixed(6)}`,
-				'Month Tokens': (monthInput + monthCache + monthOutput).toLocaleString(),
-				'Month Cost': `€${monthTotalCost.toFixed(6)}`,
-				'Projected Month Cost': `€${projectedTotalCost.toFixed(6)}`
-			}
-		];
-
 		console.log(`\n\x1b[35m=== Nono Token Consumption & Costs ===\x1b[0m`);
-		console.log(`PPID: ${process.ppid} | Active Model: ${model_name}`);
+		console.log(`Active Model: ${model_name}`);
 		console.log(`Month elapsed: ${(elapsedFraction * 100).toFixed(2)}%\n`);
-		console.table(tableData);
+
+		// ----------------------------------------------------
+		// 1. Session Consumption Table
+		// ----------------------------------------------------
+		console.log(`\x1b[1;35m✦ Session Consumption (PPID: ${process.ppid})\x1b[0m`);
+		
+		const headers1 = ['Token Type', 'Price / 1M', 'Tokens', 'Estimated Cost'];
+		const colWidths1 = [20, 12, 14, 16];
+
+		// Print Headers
+		const headerStr1 = 
+			pad(headers1[0], colWidths1[0], 'left') + ' │ ' +
+			pad(headers1[1], colWidths1[1], 'right') + ' │ ' +
+			pad(headers1[2], colWidths1[2], 'right') + ' │ ' +
+			pad(headers1[3], colWidths1[3], 'right');
+		console.log(`\x1b[1;37m${headerStr1}\x1b[0m`);
+
+		// Print Separator
+		const separator1 = 
+			'─'.repeat(colWidths1[0]) + '─┼─' +
+			'─'.repeat(colWidths1[1]) + '─┼─' +
+			'─'.repeat(colWidths1[2]) + '─┼─' +
+			'─'.repeat(colWidths1[3]);
+		console.log(`\x1b[90m${separator1}\x1b[0m`);
+
+		const printRow1 = (label, priceStr, tokens, cost) => {
+			const formattedTokens = tokens.toLocaleString();
+			const formattedCost = label === 'Total' ? `${cost.toFixed(2)}€` : `${cost.toFixed(2)}€`;
+			
+			const line = 
+				pad(label, colWidths1[0], 'left') + ' │ ' +
+				pad(priceStr, colWidths1[1], 'right') + ' │ ' +
+				pad(formattedTokens, colWidths1[2], 'right') + ' │ ' +
+				pad(formattedCost, colWidths1[3], 'right');
+			
+			if (label === 'Total') {
+				console.log(`\x1b[1m${line}\x1b[0m`);
+			} else {
+				console.log(line);
+			}
+		};
+
+		printRow1('Input (non-cached)', `${priceInput.toFixed(2)}€`, sessionInput, sessionCostInput);
+		printRow1('Cache Hit', `${priceCache.toFixed(2)}€`, sessionCache, sessionCostCache);
+		printRow1('Output', `${priceOutput.toFixed(2)}€`, sessionOutput, sessionCostOutput);
+		
+		console.log(`\x1b[90m${separator1}\x1b[0m`);
+		printRow1('Total', '-', sessionTotalTokens, sessionTotalCost);
 		console.log();
+
+		// ----------------------------------------------------
+		// 2. Monthly Consumption & Projections Table
+		// ----------------------------------------------------
+		const monthsList = [
+			'January', 'February', 'March', 'April', 'May', 'June',
+			'July', 'August', 'September', 'October', 'November', 'December'
+		];
+		const monthName = monthsList[month];
+
+		console.log(`\x1b[1;35m✦ Monthly Consumption & Projections (${monthName} ${year})\x1b[0m`);
+
+		const headers2 = ['Token Type', 'Price / 1M', 'Month Tokens', 'Month Cost', 'Projected Cost'];
+		const colWidths2 = [20, 12, 14, 12, 16];
+
+		// Print Headers
+		const headerStr2 = 
+			pad(headers2[0], colWidths2[0], 'left') + ' │ ' +
+			pad(headers2[1], colWidths2[1], 'right') + ' │ ' +
+			pad(headers2[2], colWidths2[2], 'right') + ' │ ' +
+			pad(headers2[3], colWidths2[3], 'right') + ' │ ' +
+			pad(headers2[4], colWidths2[4], 'right');
+		console.log(`\x1b[1;37m${headerStr2}\x1b[0m`);
+
+		// Print Separator
+		const separator2 = 
+			'─'.repeat(colWidths2[0]) + '─┼─' +
+			'─'.repeat(colWidths2[1]) + '─┼─' +
+			'─'.repeat(colWidths2[2]) + '─┼─' +
+			'─'.repeat(colWidths2[3]) + '─┼─' +
+			'─'.repeat(colWidths2[4]);
+		console.log(`\x1b[90m${separator2}\x1b[0m`);
+
+		const printRow2 = (label, priceStr, tokens, cost, projectedCost) => {
+			const formattedTokens = tokens.toLocaleString();
+			const formattedCost = `${cost.toFixed(2)}€`;
+			const formattedProjected = `${projectedCost.toFixed(2)}€`;
+
+			const line = 
+				pad(label, colWidths2[0], 'left') + ' │ ' +
+				pad(priceStr, colWidths2[1], 'right') + ' │ ' +
+				pad(formattedTokens, colWidths2[2], 'right') + ' │ ' +
+				pad(formattedCost, colWidths2[3], 'right') + ' │ ' +
+				pad(formattedProjected, colWidths2[4], 'right');
+
+			if (label === 'Total') {
+				console.log(`\x1b[1m${line}\x1b[0m`);
+			} else {
+				console.log(line);
+			}
+		};
+
+		printRow2('Input (non-cached)', `${priceInput.toFixed(2)}€`, monthInput, monthCostInput, projectedCostInput);
+		printRow2('Cache Hit', `${priceCache.toFixed(2)}€`, monthCache, monthCostCache, projectedCostCache);
+		printRow2('Output', `${priceOutput.toFixed(2)}€`, monthOutput, monthCostOutput, projectedCostOutput);
+
+		console.log(`\x1b[90m${separator2}\x1b[0m`);
+		printRow2('Total', '-', monthTotalTokens, monthTotalCost, projectedTotalCost);
+		console.log();
+
 		process.exit(0);
 	}
 
