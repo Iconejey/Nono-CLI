@@ -1506,9 +1506,10 @@ async function main() {
 			process.exit(0);
 		}
 
-		const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
-		const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
-		const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
+		const currency = process.env.NONO_CURRENCY || '€';
+		const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
+		const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
+		const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
 
 		let sessionInput = 0;
 		let sessionCache = 0;
@@ -1605,7 +1606,7 @@ async function main() {
 
 		const printRow1 = (label, priceStr, tokens, cost) => {
 			const formattedTokens = tokens.toLocaleString();
-			const formattedCost = label === 'Total' ? `${cost.toFixed(2)}€` : `${cost.toFixed(2)}€`;
+			const formattedCost = label === 'Total' ? `${cost.toFixed(2)}${currency}` : `${cost.toFixed(2)}${currency}`;
 			
 			const line = 
 				pad(label, colWidths1[0], 'left') + ' │ ' +
@@ -1620,9 +1621,9 @@ async function main() {
 			}
 		};
 
-		printRow1('Input (non-cached)', `${priceInput.toFixed(2)}€`, sessionInput, sessionCostInput);
-		printRow1('Cache Hit', `${priceCache.toFixed(2)}€`, sessionCache, sessionCostCache);
-		printRow1('Output', `${priceOutput.toFixed(2)}€`, sessionOutput, sessionCostOutput);
+		printRow1('Input (non-cached)', `${priceInput.toFixed(2)}${currency}`, sessionInput, sessionCostInput);
+		printRow1('Cache Hit', `${priceCache.toFixed(2)}${currency}`, sessionCache, sessionCostCache);
+		printRow1('Output', `${priceOutput.toFixed(2)}${currency}`, sessionOutput, sessionCostOutput);
 		
 		console.log(`\x1b[90m${separator1}\x1b[0m`);
 		printRow1('Total', '-', sessionTotalTokens, sessionTotalCost);
@@ -1662,8 +1663,8 @@ async function main() {
 
 		const printRow2 = (label, priceStr, tokens, cost, projectedCost) => {
 			const formattedTokens = tokens.toLocaleString();
-			const formattedCost = `${cost.toFixed(2)}€`;
-			const formattedProjected = `${projectedCost.toFixed(2)}€`;
+			const formattedCost = `${cost.toFixed(2)}${currency}`;
+			const formattedProjected = `${projectedCost.toFixed(2)}${currency}`;
 
 			const line = 
 				pad(label, colWidths2[0], 'left') + ' │ ' +
@@ -1679,9 +1680,9 @@ async function main() {
 			}
 		};
 
-		printRow2('Input (non-cached)', `${priceInput.toFixed(2)}€`, monthInput, monthCostInput, projectedCostInput);
-		printRow2('Cache Hit', `${priceCache.toFixed(2)}€`, monthCache, monthCostCache, projectedCostCache);
-		printRow2('Output', `${priceOutput.toFixed(2)}€`, monthOutput, monthCostOutput, projectedCostOutput);
+		printRow2('Input (non-cached)', `${priceInput.toFixed(2)}${currency}`, monthInput, monthCostInput, projectedCostInput);
+		printRow2('Cache Hit', `${priceCache.toFixed(2)}${currency}`, monthCache, monthCostCache, projectedCostCache);
+		printRow2('Output', `${priceOutput.toFixed(2)}${currency}`, monthOutput, monthCostOutput, projectedCostOutput);
 
 		console.log(`\x1b[90m${separator2}\x1b[0m`);
 		printRow2('Total', '-', monthTotalTokens, monthTotalCost, projectedTotalCost);
