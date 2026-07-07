@@ -1215,6 +1215,24 @@ async function main() {
 		fs.mkdirSync(cache_dir, { recursive: true });
 	}
 
+	// Handle nono --help or -h argument
+	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
+		console.log(`
+\x1b[35m✦ Nono - Ultra-efficient CLI AI Agent & Coding Workspace Specialist ✦\x1b[0m
+
+\x1b[1mUsage:\x1b[0m
+  nono [prompt]              Start Nono in interactive mode or run a prompt directly
+  nono --usage               Display token consumption and estimated costs
+  nono --clear               Clear terminal screen, scrollback, and current session history
+  nono --details             Open the logs and details of the current session in VS Code
+  nono --test-audio          Run diagnostic checks for audio feedback / chime sounds
+  nono --test-format         Run a markdown formatting and terminal rendering test
+  nono --help, -h            Show this help information
+`);
+		process.exit(0);
+		return;
+	}
+
 	// Handle nono --clear argument
 	if (process.argv[2] === '--clear') {
 		// Clear terminal screen and scrollback
