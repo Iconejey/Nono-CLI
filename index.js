@@ -36,6 +36,86 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 let start_time = Date.now();
 let details_path = '';
 
+// Strip ANSI visual escape codes
+function stripAnsi(str) {
+	if (typeof str !== 'string') return str;
+	return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+}
+
+// Truncate old, massive tool responses in history to optimize context cache
+function pruneHistory(history) {
+	if (!Array.isArray(history)) return history;
+	// We prune all messages except the very last one in history
+	for (let i = 0; i < history.length - 1; i++) {
+		const message = history[i];
+		if (message && message.role === 'user' && Array.isArray(message.parts)) {
+			for (const part of message.parts) {
+				if (part && part.functionResponse && part.functionResponse.response) {
+					const response = part.functionResponse.response;
+					
+					// Truncate view_file_contents
+					if (part.functionResponse.name === 'view_file_contents' && typeof response.content === 'string') {
+						if (response.content.length > 1000) {
+							response.content = response.content.slice(0, 1000) + '\n[... Content truncated in history pruning ...]';
+							response.is_truncated = true;
+						}
+					}
+					// Truncate search_grep
+					if (part.functionResponse.name === 'search_grep' && typeof response.matches === 'string') {
+						if (response.matches.length > 1000) {
+							response.matches = response.matches.slice(0, 1000) + '\n[... Matches truncated in history pruning ...]';
+							response.is_truncated = true;
+						}
+					}
+					// Truncate execute_system_command
+					if (part.functionResponse.name === 'execute_system_command') {
+						if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
+							response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
+							response.stdout_truncated = true;
+						}
+						if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
+							response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
+							response.stderr_truncated = true;
+						}
+					}
+				}
+			}
+		}
+	}
+	return history;
+}
+
+// Helper to run a sub-agent for summarizing massive tool output
+async function runSummarizationSubAgent(originalResult, query) {
+	if (!ai) {
+		return 'Error: Gemini AI client not initialized.';
+	}
+	try {
+		const resultString = JSON.stringify(originalResult, null, 2);
+		const prompt = `You are a helper sub-agent for a main coding assistant.
+Your task is to summarize or extract the relevant parts of a tool output because the output is too large to fit in the context window.
+
+The main agent is looking for: "${query}"
+
+Here is the original tool output:
+<tool_output>
+${resultString}
+</tool_output>
+
+Please return a concise, targeted summary or extraction of the relevant parts that satisfies the main agent's query. Maintain crucial technical details, paths, variables, and line numbers if relevant.`;
+
+		const response = await ai.models.generateContent({
+			model: model_name,
+			contents: [{ role: 'user', parts: [{ text: prompt }] }]
+		});
+
+		const text = response.candidates?.[0]?.content?.parts?.[0]?.text;
+		return text || 'Could not summarize the tool output.';
+	} catch (err) {
+		return `Error running summarization sub-agent: ${err.message || err}`;
+	}
+}
+
 function writeDetails(text) {
 	if (details_path) {
 		fs.appendFileSync(details_path, text + '\n', 'utf8');
@@ -166,6 +246,9 @@ function formatToolCallProgress(name, args) {
 		}
 		case 'propose_terminal_input': {
 			return `Proposing terminal input: "${args.command_to_inject}"`;
+		}
+		case 'read_terminal_buffer': {
+			return `Reading terminal buffer`;
 		}
 		default: {
 			const arg_vals = Object.values(args)
@@ -557,6 +640,22 @@ function getKittyScreenText() {
 		// Ignore error (e.g. remote control disabled, or not in kitty)
 	}
 	return null;
+}
+
+// Read terminal buffer history
+function readTerminalBuffer() {
+	const raw = getKittyScreenText();
+	const buffer = raw ? stripAnsi(raw) : null;
+	if (buffer === null) {
+		return {
+			status: 'error',
+			message: 'Could not read terminal buffer (e.g. remote control disabled, or not in kitty)'
+		};
+	}
+	return {
+		status: 'success',
+		buffer
+	};
 }
 
 // Run project dry-run command if possible
@@ -1007,18 +1106,21 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 
 	return new Promise(resolve => {
 		exec(command, { timeout: timeout_ms }, (error, stdout, stderr) => {
+			const clean_stdout = stripAnsi(stdout || '');
+			const clean_stderr = stripAnsi(stderr || '');
+
 			const max_chars = 30000;
-			let truncated_stdout = stdout;
-			let truncated_stderr = stderr;
+			let truncated_stdout = clean_stdout;
+			let truncated_stderr = clean_stderr;
 			let stdout_truncated = false;
 			let stderr_truncated = false;
 
-			if (stdout && stdout.length > max_chars) {
-				truncated_stdout = stdout.slice(0, max_chars) + '\n[... stdout truncated to prevent excessive token usage ...]';
+			if (clean_stdout && clean_stdout.length > max_chars) {
+				truncated_stdout = clean_stdout.slice(0, max_chars) + '\n[... stdout truncated to prevent excessive token usage ...]';
 				stdout_truncated = true;
 			}
-			if (stderr && stderr.length > max_chars) {
-				truncated_stderr = stderr.slice(0, max_chars) + '\n[... stderr truncated to prevent excessive token usage ...]';
+			if (clean_stderr && clean_stderr.length > max_chars) {
+				truncated_stderr = clean_stderr.slice(0, max_chars) + '\n[... stderr truncated to prevent excessive token usage ...]';
 				stderr_truncated = true;
 			}
 
@@ -1063,7 +1165,8 @@ const tools_mapping = {
 	patch_file: patchFile,
 	search_grep: searchGrep,
 	execute_system_command: executeSystemCommand,
-	propose_terminal_input: proposeTerminalInput
+	propose_terminal_input: proposeTerminalInput,
+	read_terminal_buffer: readTerminalBuffer
 };
 
 // Helper to get OS description dynamically
@@ -1181,6 +1284,14 @@ const tools_declarations = [
 				command_to_inject: { type: 'STRING', description: 'The command string to stage on the user shell line.' }
 			},
 			required: ['command_to_inject']
+		}
+	},
+	{
+		name: 'read_terminal_buffer',
+		description: 'Reads the active terminal buffer history (last 100 lines) from the Kitty terminal.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {}
 		}
 	}
 ];
@@ -1545,20 +1656,10 @@ async function main() {
 
 	// Ingest environmental context
 	const project_root = findProjectRoot();
-	const screen_text = getKittyScreenText();
 
 	let context_bonus = '';
-	if (screen_text) {
-		context_bonus += `\n\n[Live Terminal Buffer (last 100 lines)]:\n${screen_text}`;
-	}
 	if (project_root) {
 		context_bonus += `\n\n[Workspace Developer Mode active. Project root: ${project_root}]`;
-		try {
-			const root_structure = listDirectoryStructure({ directory_path: project_root, depth: 1 });
-			context_bonus += `\n[Project Root Directory Structure (depth 1)]:\n${JSON.stringify(root_structure, null, 2)}`;
-		} catch (e) {
-			// Ignore directory structure listing error
-		}
 	} else {
 		context_bonus += `\n\n[System Admin Mode active]`;
 	}
@@ -1573,6 +1674,7 @@ async function main() {
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
 	// Start the ReAct execution loop
+	let pendingSummaryTriggers = [];
 	while (true) {
 		try {
 			const response = await ai.models.generateContent({
@@ -1599,6 +1701,42 @@ async function main() {
 			if (!model_message) {
 				finishProgressError('No response received from model.');
 				break;
+			}
+
+			if (pendingSummaryTriggers.length > 0) {
+				const text_part = model_message.parts?.find(p => p.text);
+				const query = text_part ? text_part.text.trim() : 'relevant details';
+
+				writeDetails(`\n[Summarizer Trigger] Model specified search query: "${query}"`);
+				updateProgress('• Summarizing tool output via sub-agent...');
+
+				const last_user_msg = history[history.length - 1];
+				if (last_user_msg && last_user_msg.role === 'user' && Array.isArray(last_user_msg.parts)) {
+					for (const trigger of pendingSummaryTriggers) {
+						const summary = await runSummarizationSubAgent(trigger.originalResult, query);
+						writeDetails(`[Summarizer Trigger] Summary generated for ${trigger.name}:\n${summary}`);
+
+						const matching_part = last_user_msg.parts.find(p => 
+							p.functionResponse && 
+							p.functionResponse.name === trigger.name && 
+							(!trigger.callId || p.functionResponse.id === trigger.callId)
+						);
+						if (matching_part) {
+							matching_part.functionResponse.response = {
+								status: 'success',
+								summary: summary,
+								is_summarized: true
+							};
+						}
+					}
+				}
+
+				pendingSummaryTriggers = [];
+
+				pruneHistory(history);
+				fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+
+				continue;
 			}
 
 			// Add model's turn to history
@@ -1652,6 +1790,20 @@ async function main() {
 
 				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
+				// Check if output exceeds 1000 characters
+				const result_str = JSON.stringify(result);
+				if (result_str.length > 1000) {
+					pendingSummaryTriggers.push({
+						name,
+						callId: id,
+						originalResult: result
+					});
+					result = {
+						status: 'error',
+						error: `Tool output is too long (${result_str.length} characters). What specific information or pattern are you looking for in this output? Please describe it in your next turn so a sub-agent can extract/summarize it.`
+					};
+				}
+
 				const function_response_part = {
 					functionResponse: {
 						name,
@@ -1670,6 +1822,8 @@ async function main() {
 				parts: response_parts
 			});
 
+			pruneHistory(history);
+
 			// Save intermediate history state
 			fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 		} catch (err) {
@@ -1679,6 +1833,7 @@ async function main() {
 	}
 
 	// Save final history state
+	pruneHistory(history);
 	fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 }
 
