@@ -618,9 +618,10 @@ function playChime(type) {
 }
 
 // Helper to ask the user a question / confirmation
-function askUser(question) {
+function askUser(question, play_sound = true) {
 	clearProgress();
-	playChime('question');
+	if (play_sound) playChime('question');
+
 	return new Promise(resolve => {
 		const rl = readline.createInterface({
 			input: process.stdin,
@@ -629,16 +630,16 @@ function askUser(question) {
 				const lastAtIdx = line.lastIndexOf('@');
 				if (lastAtIdx !== -1 && (lastAtIdx === 0 || /\s/.test(line[lastAtIdx - 1]))) {
 					const query = line.substring(lastAtIdx + 1); // e.g., "src/u" or "src/" or ""
-					
+
 					let dirPath = '';
 					let filePrefix = query;
-					
+
 					if (query.includes('/')) {
 						const lastSlashIdx = query.lastIndexOf('/');
 						dirPath = query.substring(0, lastSlashIdx + 1); // e.g., "src/"
 						filePrefix = query.substring(lastSlashIdx + 1); // e.g., "u"
 					}
-					
+
 					const absDir = path.resolve(process.cwd(), dirPath);
 					if (fs.existsSync(absDir)) {
 						try {
@@ -656,7 +657,7 @@ function askUser(question) {
 										try {
 											isDir = fs.statSync(itemPath).isDirectory();
 										} catch (e) {}
-										
+
 										const itemDisplay = isDir ? item + '/' : item;
 										hits.push(dirPath + itemDisplay);
 									}
@@ -2063,7 +2064,7 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 
 	// If no arguments, prompt interactively
 	if (!user_query.trim()) {
-		user_query = await askUser('\x1b[35m> \x1b[0m');
+		user_query = await askUser('\x1b[35m> \x1b[0m', false);
 		if (!user_query.trim()) {
 			console.log('No prompt provided. Exiting.');
 			process.exit(0);
