@@ -624,7 +624,52 @@ function askUser(question) {
 	return new Promise(resolve => {
 		const rl = readline.createInterface({
 			input: process.stdin,
-			output: process.stdout
+			output: process.stdout,
+			completer: function completer(line) {
+				const lastAtIdx = line.lastIndexOf('@');
+				if (lastAtIdx !== -1 && (lastAtIdx === 0 || /\s/.test(line[lastAtIdx - 1]))) {
+					const query = line.substring(lastAtIdx + 1); // e.g., "src/u" or "src/" or ""
+					
+					let dirPath = '';
+					let filePrefix = query;
+					
+					if (query.includes('/')) {
+						const lastSlashIdx = query.lastIndexOf('/');
+						dirPath = query.substring(0, lastSlashIdx + 1); // e.g., "src/"
+						filePrefix = query.substring(lastSlashIdx + 1); // e.g., "u"
+					}
+					
+					const absDir = path.resolve(process.cwd(), dirPath);
+					if (fs.existsSync(absDir)) {
+						try {
+							const stat = fs.statSync(absDir);
+							if (stat.isDirectory()) {
+								const items = fs.readdirSync(absDir);
+								const hits = [];
+								for (const item of items) {
+									if (item === '.git' || item === 'node_modules' || item === '.cache') {
+										continue;
+									}
+									if (item.startsWith(filePrefix)) {
+										const itemPath = path.join(absDir, item);
+										let isDir = false;
+										try {
+											isDir = fs.statSync(itemPath).isDirectory();
+										} catch (e) {}
+										
+										const itemDisplay = isDir ? item + '/' : item;
+										hits.push(dirPath + itemDisplay);
+									}
+								}
+								return [hits.map(h => '@' + h), '@' + query];
+							}
+						} catch (e) {
+							// Ignore
+						}
+					}
+				}
+				return [[], line];
+			}
 		});
 		rl.question(question, answer => {
 			rl.close();
