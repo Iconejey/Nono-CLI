@@ -2097,7 +2097,6 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 				const query = text_part ? text_part.text.trim() : 'relevant details';
 
 				writeDetails(`\n[Summarizer Trigger] Model specified search query: "${query}"`);
-				updateProgress('• Summarizing tool output via sub-agent...');
 
 				const last_user_msg = history[history.length - 1];
 				if (last_user_msg && last_user_msg.role === 'user' && Array.isArray(last_user_msg.parts)) {
