@@ -1505,7 +1505,7 @@ async function main() {
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
-  nono pr-review [url]       Run a GitHub PR review on the specified PR URL
+  nono --pr-review [url]     Run a GitHub PR review on the specified PR URL
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -1910,12 +1910,12 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 	}
 
-	// Handle nono pr-review <pr-url> command
-	if (process.argv[2] === 'pr-review') {
+	// Handle nono --pr-review <pr-url> command
+	if (process.argv[2] === '--pr-review' || process.argv[2] === 'pr-review') {
 		const prUrl = process.argv[3];
 		if (!prUrl) {
 			console.error('\x1b[31mError: Pull request URL is required.\x1b[0m');
-			console.error('Usage: nono pr-review <github-pr-url>');
+			console.error('Usage: nono --pr-review <github-pr-url>');
 			playChime('error');
 			process.exit(1);
 		}
@@ -1981,7 +1981,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 			updateProgress(`• Analyzing changes in ${filesData.length} file(s)...`);
 			for (const file of filesData) {
-				updateProgress(`  - Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
+				updateProgress(`    • Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
 			}
 
 			updateProgress('• Generating final PR review report with Gemini...');
