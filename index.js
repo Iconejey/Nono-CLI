@@ -1240,6 +1240,128 @@ async function main() {
 		return;
 	}
 
+	// Handle nono --usage argument
+	if (process.argv[2] === '--usage') {
+		const log_file = path.join(cache_dir, 'consumption.json');
+		if (!fs.existsSync(log_file)) {
+			console.log('No usage yet');
+			process.exit(0);
+		}
+		let logs = [];
+		try {
+			logs = JSON.parse(fs.readFileSync(log_file, 'utf8'));
+		} catch (e) {
+			console.log('No usage yet');
+			process.exit(0);
+		}
+		if (logs.length === 0) {
+			console.log('No usage yet');
+			process.exit(0);
+		}
+
+		const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
+		const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
+		const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
+
+		let sessionInput = 0;
+		let sessionCache = 0;
+		let sessionOutput = 0;
+
+		let monthInput = 0;
+		let monthCache = 0;
+		let monthOutput = 0;
+
+		const now = new Date();
+		const year = now.getFullYear();
+		const month = now.getMonth();
+
+		const startOfMonth = new Date(year, month, 1);
+		const nextMonth = new Date(year, month + 1, 1);
+		const elapsedFraction = Math.max(0.0001, (now - startOfMonth) / (nextMonth - startOfMonth));
+
+		for (const log of logs) {
+			const logDate = new Date(log.timestamp);
+			const isInCurrentMonth = logDate.getFullYear() === year && logDate.getMonth() === month;
+
+			const inputVal = (log.promptTokenCount || 0) - (log.cachedContentTokenCount || 0);
+			const cacheVal = log.cachedContentTokenCount || 0;
+			const outputVal = log.candidatesTokenCount || 0;
+
+			if (log.ppid === process.ppid) {
+				sessionInput += inputVal;
+				sessionCache += cacheVal;
+				sessionOutput += outputVal;
+			}
+
+			if (isInCurrentMonth) {
+				monthInput += inputVal;
+				monthCache += cacheVal;
+				monthOutput += outputVal;
+			}
+		}
+
+		const sessionCostInput = (sessionInput * priceInput) / 1000000;
+		const sessionCostCache = (sessionCache * priceCache) / 1000000;
+		const sessionCostOutput = (sessionOutput * priceOutput) / 1000000;
+		const sessionTotalCost = sessionCostInput + sessionCostCache + sessionCostOutput;
+
+		const monthCostInput = (monthInput * priceInput) / 1000000;
+		const monthCostCache = (monthCache * priceCache) / 1000000;
+		const monthCostOutput = (monthOutput * priceOutput) / 1000000;
+		const monthTotalCost = monthCostInput + monthCostCache + monthCostOutput;
+
+		const projectedCostInput = monthCostInput / elapsedFraction;
+		const projectedCostCache = monthCostCache / elapsedFraction;
+		const projectedCostOutput = monthCostOutput / elapsedFraction;
+		const projectedTotalCost = monthTotalCost / elapsedFraction;
+
+		const tableData = [
+			{
+				'Token Type': 'Input (non-cached)',
+				'Price / 1M': `€${priceInput.toFixed(3)}`,
+				'Session Tokens': sessionInput.toLocaleString(),
+				'Session Cost': `€${sessionCostInput.toFixed(6)}`,
+				'Month Tokens': monthInput.toLocaleString(),
+				'Month Cost': `€${monthCostInput.toFixed(6)}`,
+				'Projected Month Cost': `€${projectedCostInput.toFixed(6)}`
+			},
+			{
+				'Token Type': 'Cache Hit',
+				'Price / 1M': `€${priceCache.toFixed(3)}`,
+				'Session Tokens': sessionCache.toLocaleString(),
+				'Session Cost': `€${sessionCostCache.toFixed(6)}`,
+				'Month Tokens': monthCache.toLocaleString(),
+				'Month Cost': `€${monthCostCache.toFixed(6)}`,
+				'Projected Month Cost': `€${projectedCostCache.toFixed(6)}`
+			},
+			{
+				'Token Type': 'Output',
+				'Price / 1M': `€${priceOutput.toFixed(3)}`,
+				'Session Tokens': sessionOutput.toLocaleString(),
+				'Session Cost': `€${sessionCostOutput.toFixed(6)}`,
+				'Month Tokens': monthOutput.toLocaleString(),
+				'Month Cost': `€${monthCostOutput.toFixed(6)}`,
+				'Projected Month Cost': `€${projectedCostOutput.toFixed(6)}`
+			},
+			{
+				'Token Type': 'Total',
+				'Price / 1M': '-',
+				'Session Tokens': (sessionInput + sessionCache + sessionOutput).toLocaleString(),
+				'Session Cost': `€${sessionTotalCost.toFixed(6)}`,
+				'Month Tokens': (monthInput + monthCache + monthOutput).toLocaleString(),
+				'Month Cost': `€${monthTotalCost.toFixed(6)}`,
+				'Projected Month Cost': `€${projectedTotalCost.toFixed(6)}`
+			}
+		];
+
+		console.log(`\n\x1b[35m=== Nono Token Consumption & Costs ===\x1b[0m`);
+		console.log(`PPID: ${process.ppid} | Active Model: ${model_name}`);
+		console.log(`Month elapsed: ${(elapsedFraction * 100).toFixed(2)}%\n`);
+		console.table(tableData);
+		console.log();
+		process.exit(0);
+	}
+
 	// Handle nono --details argument
 	if (process.argv[2] === '--details') {
 		const details_file = path.join(cache_dir, `details-${process.ppid}.log`);
@@ -1391,6 +1513,10 @@ Jun 29 00:34:41 host fprintd[465101]: Goodix Fingerprint Sensor 53xc active.
 					}
 				}
 			});
+
+			if (response.usageMetadata) {
+				logTokenUsage(model_name, response.usageMetadata);
+			}
 
 			const candidate = response.candidates?.[0];
 			const model_message = candidate?.content;
