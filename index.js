@@ -418,6 +418,9 @@ async function formatMarkdownForTerminal(md) {
 			continue;
 		}
 
+		// Skip horizontal rules/thematic breaks ('---')
+		if (line.trim() === '---') continue;
+
 		// Handle Headers: convert ### Title to Bold Purple
 		const header_match = /^#{1,6}\s+(.*)$/.exec(line);
 		if (header_match) {
