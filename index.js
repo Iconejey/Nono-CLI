@@ -78,6 +78,13 @@ function pruneHistory(history) {
 							response.stderr_truncated = true;
 						}
 					}
+					// Truncate view_file_git_diff
+					if (part.functionResponse.name === 'view_file_git_diff' && typeof response.diff === 'string') {
+						if (response.diff.length > 1000) {
+							response.diff = response.diff.slice(0, 1000) + '\n[... Diff truncated in history pruning ...]';
+							response.is_truncated = true;
+						}
+					}
 				}
 			}
 		}
@@ -324,6 +331,10 @@ function formatToolCallProgress(name, args) {
 		case 'read_terminal_buffer': {
 			return `Reading terminal buffer`;
 		}
+
+		case 'view_file_git_diff': {
+			return `Viewing git diff for ${basename}`;
+		}
 		default: {
 			const arg_vals = Object.values(args)
 				.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -485,10 +496,19 @@ function clearProgress() {
 	// No-op since we don't roll/clear progress lines anymore
 }
 
+function formatElapsedTime(seconds) {
+	if (seconds >= 60) {
+		const m = Math.floor(seconds / 60);
+		const s = seconds % 60;
+		return `${m}m ${s}s`;
+	}
+	return `${seconds}s`;
+}
+
 async function finishProgress(final_text) {
 	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
-	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
+	console.log(`\x1b[90m• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
 	const formatted = await formatMarkdownForTerminal(final_text.trim());
 	console.log();
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
@@ -500,7 +520,7 @@ async function finishProgress(final_text) {
 function finishProgressError(err_msg) {
 	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
-	console.log(`\x1b[90m• Worked for ${elapsed}s\x1b[0m`);
+	console.log(`\x1b[90m• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
 	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
 	playChime('error');
 	writeDetails(`\n[Fatal Error]\n${err_msg}`);
@@ -912,13 +932,10 @@ function listDirectoryStructure({ directory_path, depth = 2 }) {
 	const abs_path = path.resolve(directory_path);
 
 	function recurse(dir, current_depth = 1) {
-		if (!fs.existsSync(dir)) {
-			throw new Error(`Directory does not exist: ${dir}`);
-		}
+		if (!fs.existsSync(dir)) throw new Error(`Directory does not exist: ${dir}`);
+
 		const stat = fs.statSync(dir);
-		if (!stat.isDirectory()) {
-			throw new Error(`Path is not a directory: ${dir}`);
-		}
+		if (!stat.isDirectory()) throw new Error(`Path is not a directory: ${dir}`);
 
 		const items = fs.readdirSync(dir);
 		const result = [];
@@ -1280,6 +1297,28 @@ function proposeTerminalInput({ command_to_inject }) {
 	});
 }
 
+const IGNORED_FILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Cargo.lock', 'go.sum'];
+
+function isIgnoredFile(filepath) {
+	return IGNORED_FILES.some(ignored => filepath.endsWith(ignored));
+}
+
+function viewFileGitDiff({ base_branch, file_path }) {
+	if (isIgnoredFile(file_path)) {
+		return Promise.resolve({ status: 'success', diff: '(Diff ignored for lockfile)' });
+	}
+	return new Promise(resolve => {
+		const cmd = `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}`;
+		exec(cmd, { timeout: 10000 }, (error, stdout, stderr) => {
+			if (error && error.code !== 1) {
+				resolve({ status: 'error', error: stderr || error.message });
+			} else {
+				resolve({ status: 'success', diff: (stdout || '').trim() || 'No differences.' });
+			}
+		});
+	});
+}
+
 // Map tool name to implementation function
 const tools_mapping = {
 	list_directory_structure: listDirectoryStructure,
@@ -1289,7 +1328,8 @@ const tools_mapping = {
 	search_grep: searchGrep,
 	execute_system_command: executeSystemCommand,
 	propose_terminal_input: proposeTerminalInput,
-	read_terminal_buffer: readTerminalBuffer
+	read_terminal_buffer: readTerminalBuffer,
+	view_file_git_diff: viewFileGitDiff
 };
 
 // Helper to get OS description dynamically
@@ -1419,6 +1459,19 @@ const tools_declarations = [
 	}
 ];
 
+const view_file_git_diff_declaration = {
+	name: 'view_file_git_diff',
+	description: 'Shows the line-by-line git diff of a specific file in the PR branch compared to the base branch.',
+	parameters: {
+		type: 'OBJECT',
+		properties: {
+			base_branch: { type: 'STRING', description: 'The base branch of the PR.' },
+			file_path: { type: 'STRING', description: 'The relative path of the file to inspect.' }
+		},
+		required: ['base_branch', 'file_path']
+	}
+};
+
 const system_prompt = `You are Nono, an ultra-efficient CLI AI Agent & Coding Workspace Specialist.
 You run on a ${os_name} host and operate in one of two modes:
 1. System Admin Mode: Focused on minimal, precise system calls (NetworkManager, systemctl, diagnostics).
@@ -1438,6 +1491,24 @@ Guidelines:
 - Maintain documentation integrity.
 - Always specify the language name (e.g., \`\`\`javascript, \`\`\`python, \`\`\`bash) when writing a markdown code block to ensure proper terminal syntax highlighting.
 `;
+
+const pr_review_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
+You are running in a temporary clone of the repository.
+
+Your objectives:
+1. Identify the changed files and overall repository diff from your initial prompt context.
+2. Use "view_file_git_diff" to see the specific changes in each file.
+3. For modified files, trace their dependencies and usage patterns in the codebase using "search_grep" and "view_file_contents".
+4. Focus on deep code logic, API consistency, performance issues, architectural alignments, or potential logical bugs.
+5. Identify potential bugs, logical issues, or regression risks.
+6. Compile a comprehensive, professional PR review report in Markdown format.
+
+Constraints:
+- You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
+- Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
+- Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
+
+Provide your final report as your final text message without calling any more tools.`;
 
 // Helper to log token consumption metrics
 function logTokenUsage(model, usageMetadata) {
@@ -1479,6 +1550,42 @@ async function main() {
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
 	if (!fs.existsSync(cache_dir)) {
 		fs.mkdirSync(cache_dir, { recursive: true });
+	}
+
+	// Clean up old nono-pr- directories in tmp (older than 2 hours)
+	try {
+		const files = fs.readdirSync(os.tmpdir());
+		const now = Date.now();
+		for (const file of files) {
+			if (file.startsWith('nono-pr-')) {
+				const fullPath = path.join(os.tmpdir(), file);
+				const stat = fs.statSync(fullPath);
+				if (now - stat.mtimeMs > 2 * 60 * 60 * 1000) {
+					fs.rmSync(fullPath, { recursive: true, force: true });
+				}
+			}
+		}
+	} catch (e) {}
+
+	let is_pr_review = false;
+	let pr_review_base_branch = '';
+	let pr_review_temp_dir = '';
+	let user_query = '';
+
+	// Check if we are in a follow-up session for a PR review
+	const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+	if (fs.existsSync(prMetaPath) && process.argv[2] !== '--clear' && process.argv[2] !== '--pr-review' && process.argv[2] !== 'pr-review') {
+		try {
+			const meta = JSON.parse(fs.readFileSync(prMetaPath, 'utf8'));
+			if (meta.tempDir && fs.existsSync(meta.tempDir)) {
+				is_pr_review = true;
+				pr_review_base_branch = meta.baseBranch;
+				pr_review_temp_dir = meta.tempDir;
+				process.chdir(pr_review_temp_dir);
+			}
+		} catch (e) {
+			// ignore corrupt meta file
+		}
 	}
 
 	// Handle background summarization worker invocation
@@ -1684,14 +1791,28 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 		// Delete session and details files for current session
 		const session_path = path.join(cache_dir, `session-${process.ppid}.json`);
+		const session_pr_path = path.join(cache_dir, `session-pr-${process.ppid}.json`);
 		const details_file = path.join(cache_dir, `details-${process.ppid}.log`);
+		const pr_meta_path = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
 
 		try {
 			if (fs.existsSync(session_path)) {
 				fs.unlinkSync(session_path);
 			}
+			if (fs.existsSync(session_pr_path)) {
+				fs.unlinkSync(session_pr_path);
+			}
 			if (fs.existsSync(details_file)) {
 				fs.unlinkSync(details_file);
+			}
+			if (fs.existsSync(pr_meta_path)) {
+				try {
+					const meta = JSON.parse(fs.readFileSync(pr_meta_path, 'utf8'));
+					if (meta.tempDir && fs.existsSync(meta.tempDir)) {
+						fs.rmSync(meta.tempDir, { recursive: true, force: true });
+					}
+				} catch (e) {}
+				fs.unlinkSync(pr_meta_path);
 			}
 			console.log('\x1b[32m✔ Nono session cleared. Ready for a new chat!\x1b[0m\n');
 		} catch (err) {
@@ -1953,7 +2074,9 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				}
 			});
 			if (!response.ok) {
-				throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`);
+				const oauthScopes = response.headers.get('x-oauth-scopes') || 'none';
+				const acceptedScopes = response.headers.get('x-accepted-oauth-scopes') || 'none';
+				throw new Error(`GitHub API returned ${response.status}: ${response.statusText}\n  [Diagnostics: Token scopes: "${oauthScopes}", Required/Accepted scopes: "${acceptedScopes}"]`);
 			}
 			return response.json();
 		}
@@ -1963,167 +2086,182 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			const prData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`);
 			const prTitle = prData.title;
 			const prAuthor = prData.user.login;
+			pr_review_base_branch = prData.base.ref;
+			const compareBranch = prData.head.ref;
+			const headRepoFullName = prData.head.repo.full_name;
 
-			updateProgress('• Fetching list of changed files and diffs...');
+			updateProgress('• Fetching list of changed files...');
 			const filesData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/files`);
 
-			updateProgress(`• Analyzing changes in ${filesData.length} file(s)...`);
-			for (const file of filesData) {
-				updateProgress(`    • Analyzing ${file.filename} (+${file.additions} -${file.deletions})...`);
+			const filteredFiles = filesData.filter(file => !isIgnoredFile(file.filename));
+
+			updateProgress(`• Cloning repository branch "${compareBranch}" for analysis...`);
+			const tempDir = path.join(os.tmpdir(), `nono-pr-${owner}-${repo}-${pullNumber}-${Date.now()}`);
+			pr_review_temp_dir = tempDir;
+
+			function cleanup() {
+				try {
+					if (fs.existsSync(tempDir)) {
+						fs.rmSync(tempDir, { recursive: true, force: true });
+					}
+				} catch (e) {}
 			}
 
-			updateProgress('• Generating final PR review report with Gemini...');
-			const prompt = `You are an expert code reviewer. Perform a detailed pull request review for the following Github Pull Request:
+			const shellEscape = (arg) => `'` + String(arg).replace(/'/g, "'\\''") + `'`;
+			const cloneUrl = `https://${githubToken}@github.com/${headRepoFullName}.git`;
+			const cloneCmd = `git clone --no-single-branch --branch ${shellEscape(compareBranch)} ${shellEscape(cloneUrl)} ${shellEscape(tempDir)}`;
 
-Pull Request: ${owner}/${repo}#${pullNumber}
+			execSync(cloneCmd, { stdio: 'ignore' });
+
+			// Switch working directory to the cloned repo
+			process.chdir(tempDir);
+
+			// Pre-fetch the repo diff to provide it in the initial prompt
+			let repoDiff = '';
+			try {
+				repoDiff = execSync(`git diff --name-status origin/${pr_review_base_branch}...HEAD`, { encoding: 'utf8' }).trim();
+			} catch (e) {
+				try {
+					repoDiff = execSync(`git diff --name-status origin/${pr_review_base_branch} HEAD`, { encoding: 'utf8' }).trim();
+				} catch (e2) {
+					repoDiff = '(Could not retrieve git diff automatically)';
+				}
+			}
+
+			if (repoDiff && repoDiff !== '(Could not retrieve git diff automatically)') {
+				repoDiff = repoDiff.split('\n').filter(line => {
+					if (!line) return false;
+					const parts = line.split(/\s+/);
+					const filepath = parts[parts.length - 1];
+					return !isIgnoredFile(filepath);
+				}).join('\n');
+			}
+
+			is_pr_review = true;
+			user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
 Title: ${prTitle}
 Author: ${prAuthor}
+Base branch: ${pr_review_base_branch}
+Compare branch: ${compareBranch}
 
-Here is the list of changed files and their diffs:
+Here is the list of changed files in this PR (excluding lockfiles):
+${filteredFiles.map(f => `- ${f.filename} (+${f.additions} -${f.deletions})`).join('\n')}
 
-${filesData
-	.map(
-		(file, index) => `
----
-File: ${file.filename}
-Status: ${file.status}
-Additions: ${file.additions}, Deletions: ${file.deletions}
-Diff:
-\`\`\`diff
-${file.patch || '(No patch available or binary file)'}
+Here is the status of modified files against the base branch:
 \`\`\`
-`
-	)
-	.join('\n')}
+${repoDiff || 'No differences found.'}
+\`\`\`
 
-Please analyze the diffs to identify potential issues, code smells, or areas for improvement.
-Identify:
-1. Code that does not follow best practices.
-2. Potential bugs or vulnerabilities.
-3. Suggestions for improvements in code structure or readability.
+Analyze the changed files, trace references in the codebase, and write your final PR review report in Markdown format.`;
 
-Generate a comprehensive PR review report in Markdown format. The report MUST include:
-- A title: "# Github PR Review: ${prTitle} (#${pullNumber})"
-- Summary of the PR (title, author, number of files changed).
-- List of files changed with a brief description of the changes.
-- Detailed analysis for each file, including identified issues and suggestions for improvement. If a file has no issues, explicitly state that it looks good.
+			// Save metadata to support subsequent follow-up commands in the same shell
+			const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+			fs.writeFileSync(prMetaPath, JSON.stringify({
+				tempDir,
+				baseBranch: pr_review_base_branch
+			}), 'utf8');
 
-Return ONLY the markdown content. Do not wrap the response in markdown code blocks like \`\`\`markdown.`;
-
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: [{ role: 'user', parts: [{ text: prompt }] }]
-			});
-
-			if (response.usageMetadata) {
-				logTokenUsage(model_name, response.usageMetadata);
-			}
-
-			const reportContent = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-			await finishProgress(reportContent);
-			process.exit(0);
 		} catch (err) {
-			console.error(`\x1b[31mError during PR review: ${err.message || err}\x1b[0m`);
+			cleanup();
+			console.error(`\x1b[31mError during PR review setup: ${err.message || err}\x1b[0m`);
 			playChime('error');
 			process.exit(1);
 		}
-		return;
 	}
 
 	// Capture CLI arguments
-	let user_query = '';
-
-	if (process.argv[2] === '--full' || process.argv[2] === '-f') {
-		const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
-		try {
-			fs.writeFileSync(tempPath, '', 'utf8');
-			await new Promise((resolve, reject) => {
-				const editors = [];
-				if (process.env.VISUAL) editors.push(process.env.VISUAL);
-				if (process.env.EDITOR) editors.push(process.env.EDITOR);
-				for (const fallback of ['vim', 'vi', 'nano']) {
-					if (!editors.includes(fallback)) {
-						editors.push(fallback);
-					}
-				}
-
-				let editorIndex = 0;
-
-				function trySpawn() {
-					if (editorIndex >= editors.length) {
-						reject(new Error(`None of the editors (${editors.join(', ')}) could be started.`));
-						return;
+	if (!is_pr_review) {
+		if (process.argv[2] === '--full' || process.argv[2] === '-f') {
+			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
+			try {
+				fs.writeFileSync(tempPath, '', 'utf8');
+				await new Promise((resolve, reject) => {
+					const editors = [];
+					if (process.env.VISUAL) editors.push(process.env.VISUAL);
+					if (process.env.EDITOR) editors.push(process.env.EDITOR);
+					for (const fallback of ['vim', 'vi', 'nano']) {
+						if (!editors.includes(fallback)) {
+							editors.push(fallback);
+						}
 					}
 
-					const editor = editors[editorIndex];
-					const parts = editor.trim().split(/\s+/);
-					const cmd = parts[0];
-					const args = [...parts.slice(1), tempPath];
+					let editorIndex = 0;
 
-					const child = spawn(cmd, args, { stdio: 'inherit' });
-					let completed = false;
-
-					child.on('error', err => {
-						if (completed) return;
-						completed = true;
-						if (err.code === 'ENOENT') {
-							editorIndex++;
-							trySpawn();
-						} else {
-							reject(err);
+					function trySpawn() {
+						if (editorIndex >= editors.length) {
+							reject(new Error(`None of the editors (${editors.join(', ')}) could be started.`));
+							return;
 						}
-					});
 
-					child.on('close', code => {
-						if (completed) return;
-						completed = true;
-						if (code === 0) {
-							resolve();
-						} else if (code === 127) {
-							editorIndex++;
-							trySpawn();
-						} else {
-							reject(new Error(`Editor (${cmd}) exited with code ${code}`));
-						}
-					});
+						const editor = editors[editorIndex];
+						const parts = editor.trim().split(/\s+/);
+						const cmd = parts[0];
+						const args = [...parts.slice(1), tempPath];
+
+						const child = spawn(cmd, args, { stdio: 'inherit' });
+						let completed = false;
+
+						child.on('error', err => {
+							if (completed) return;
+							completed = true;
+							if (err.code === 'ENOENT') {
+								editorIndex++;
+								trySpawn();
+							} else {
+								reject(err);
+							}
+						});
+
+						child.on('close', code => {
+							if (completed) return;
+							completed = true;
+							if (code === 0) {
+								resolve();
+							} else if (code === 127) {
+								editorIndex++;
+								trySpawn();
+							} else {
+								reject(new Error(`Editor (${cmd}) exited with code ${code}`));
+							}
+						});
+					}
+
+					trySpawn();
+				});
+				if (fs.existsSync(tempPath)) {
+					user_query = fs.readFileSync(tempPath, 'utf8');
+					try {
+						fs.unlinkSync(tempPath);
+					} catch (e) {
+						// Ignore cleanup errors
+					}
 				}
-
-				trySpawn();
-			});
-			if (fs.existsSync(tempPath)) {
-				user_query = fs.readFileSync(tempPath, 'utf8');
+			} catch (err) {
 				try {
-					fs.unlinkSync(tempPath);
+					if (fs.existsSync(tempPath)) {
+						fs.unlinkSync(tempPath);
+					}
 				} catch (e) {
 					// Ignore cleanup errors
 				}
+				console.error(`\x1b[31mError opening/reading temp file in editor: ${err.message}\x1b[0m`);
+				process.exit(1);
 			}
-		} catch (err) {
-			try {
-				if (fs.existsSync(tempPath)) {
-					fs.unlinkSync(tempPath);
-				}
-			} catch (e) {
-				// Ignore cleanup errors
-			}
-			console.error(`\x1b[31mError opening/reading temp file in editor: ${err.message}\x1b[0m`);
-			process.exit(1);
-		}
 
-		if (!user_query.trim()) {
-			console.log('No prompt provided. Exiting.');
-			process.exit(0);
-		}
-	} else {
-		user_query = process.argv.slice(2).join(' ');
-
-		// If no arguments, prompt interactively
-		if (!user_query.trim()) {
-			user_query = await askUser('\x1b[35m> \x1b[0m', false);
 			if (!user_query.trim()) {
 				console.log('No prompt provided. Exiting.');
 				process.exit(0);
+			}
+		} else {
+			user_query = process.argv.slice(2).join(' ');
+
+			// If no arguments, prompt interactively
+			if (!user_query.trim()) {
+				user_query = await askUser('\x1b[35m> \x1b[0m', false);
+				if (!user_query.trim()) {
+					console.log('No prompt provided. Exiting.');
+					process.exit(0);
+				}
 			}
 		}
 	}
@@ -2136,9 +2274,11 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 	fs.writeFileSync(details_path, '', 'utf8');
 
 	// Load or initialize session
-	const session_path = path.join(cache_dir, `session-${process.ppid}.json`);
+	const session_path = is_pr_review
+		? path.join(cache_dir, `session-pr-${process.ppid}.json`)
+		: path.join(cache_dir, `session-${process.ppid}.json`);
 	let history = [];
-	if (fs.existsSync(session_path)) {
+	if (!is_pr_review && fs.existsSync(session_path)) {
 		try {
 			history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
 		} catch (e) {
@@ -2147,10 +2287,12 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 	}
 
 	// Ingest environmental context
-	const project_root = findProjectRoot();
+	let project_root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
 
 	let context_bonus = '';
-	if (project_root) {
+	if (is_pr_review) {
+		context_bonus += `\n\n[PR Review Mode active. Base Branch: ${pr_review_base_branch}, Root: ${project_root}]`;
+	} else if (project_root) {
 		context_bonus += `\n\n[Workspace Developer Mode active. Project root: ${project_root}]`;
 	} else {
 		context_bonus += `\n\n[System Admin Mode active]`;
@@ -2165,24 +2307,54 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
+	if (is_pr_review) {
+		console.log('\x1b[90m✦ Starting analysis...\x1b[0m');
+	}
+
 	// Start the ReAct execution loop
 	let pendingSummaryTriggers = [];
 	while (true) {
 		try {
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: history,
-				config: {
-					systemInstruction: system_prompt,
-					tools: [{ functionDeclarations: tools_declarations }, { googleSearch: {} }],
-					toolConfig: {
-						functionCallingConfig: {
-							mode: 'AUTO'
-						},
-						includeServerSideToolInvocations: true
+			let response;
+			let attempts = 0;
+			const maxAttempts = 3;
+			while (true) {
+				try {
+					response = await ai.models.generateContent({
+						model: model_name,
+						contents: history,
+						config: {
+							systemInstruction: is_pr_review ? pr_review_system_prompt : system_prompt,
+							tools: [
+								{
+									functionDeclarations: is_pr_review
+										? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+										: tools_declarations
+								},
+								{ googleSearch: {} }
+							],
+							toolConfig: {
+								functionCallingConfig: {
+									mode: 'AUTO'
+								},
+								includeServerSideToolInvocations: true
+							}
+						}
+					});
+					break;
+				} catch (apiErr) {
+					attempts++;
+					const errStr = String(apiErr.message || apiErr);
+					const isTransient = errStr.includes('503') || errStr.includes('429') || errStr.includes('UNAVAILABLE') || errStr.includes('service is currently unavailable');
+					if (isTransient && attempts < maxAttempts) {
+						const delay = Math.pow(2, attempts) * 1000;
+						updateProgress(`• Transient API error encountered (${apiErr.message || apiErr}). Retrying in ${delay / 1000}s (Attempt ${attempts}/${maxAttempts})...`);
+						await new Promise(resolve => setTimeout(resolve, delay));
+						continue;
 					}
+					throw apiErr;
 				}
-			});
+			}
 
 			if (response.usageMetadata) {
 				logTokenUsage(model_name, response.usageMetadata);
