@@ -1939,21 +1939,6 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 
 		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
-		updateProgress('• Cleaning up previous PR review reports...');
-
-		// Cleanup previous reviews
-		if (fs.existsSync(cache_dir)) {
-			const files = fs.readdirSync(cache_dir);
-			for (const file of files) {
-				if (file.startsWith('pr-review-') && file.endsWith('.md')) {
-					try {
-						fs.unlinkSync(path.join(cache_dir, file));
-					} catch (e) {
-						// ignore
-					}
-				}
-			}
-		}
 
 		async function githubFetch(url) {
 			const response = await fetch(url, {
@@ -2033,25 +2018,8 @@ Return ONLY the markdown content. Do not wrap the response in markdown code bloc
 
 			const reportContent = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-			const safeOwner = owner.replace(/[^a-zA-Z0-9_-]/g, '_');
-			const safeRepo = repo.replace(/[^a-zA-Z0-9_-]/g, '_');
-			const reportFilename = `pr-review-${safeOwner}-${safeRepo}-${pullNumber}.md`;
-			const reportPath = path.join(cache_dir, reportFilename);
-
-			updateProgress(`• Saving report to: ${reportPath}`);
-			fs.writeFileSync(reportPath, reportContent, 'utf8');
-
-			updateProgress('• Opening report in VS Code...');
-			playChime('complete');
-
-			exec(`code ${JSON.stringify(reportPath)}`, error => {
-				if (error) {
-					console.error(`Failed to open VS Code: ${error.message}`);
-					process.exit(1);
-				}
-				console.log('\x1b[32m✔ PR review completed and opened in VS Code!\x1b[0m');
-				process.exit(0);
-			});
+			await finishProgress(reportContent);
+			process.exit(0);
 		} catch (err) {
 			console.error(`\x1b[31mError during PR review: ${err.message || err}\x1b[0m`);
 			playChime('error');
