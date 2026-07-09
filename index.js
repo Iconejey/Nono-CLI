@@ -42,6 +42,26 @@ function stripAnsi(str) {
 	return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
 }
 
+// Helper to extract JSON block from markdown response
+function extractJsonBlock(text) {
+	if (!text) return null;
+	const regex = /```json\s*([\s\S]*?)\s*```/;
+	const match = text.match(regex);
+	if (match) {
+		try {
+			return JSON.parse(match[1].trim());
+		} catch (e) {}
+	}
+	const curlyRegex = /(\{[\s\S]*?\})/;
+	const curlyMatch = text.match(curlyRegex);
+	if (curlyMatch) {
+		try {
+			return JSON.parse(curlyMatch[1].trim());
+		} catch (e) {}
+	}
+	return null;
+}
+
 // Truncate old, massive tool responses in history to optimize context cache
 function pruneHistory(history) {
 	if (!Array.isArray(history)) return history;
@@ -1510,6 +1530,43 @@ Constraints:
 
 Provide your final report as your final text message without calling any more tools.`;
 
+const pr_review_comment_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
+You are running in a temporary clone of the repository.
+
+Your objectives:
+1. Identify the changed files and overall repository diff from your initial prompt context.
+2. Use "view_file_git_diff" to see the specific changes in each file.
+3. For modified files, trace their dependencies and usage patterns in the codebase using "search_grep" and "view_file_contents".
+4. Focus on deep code logic, API consistency, performance issues, architectural alignments, or potential logical bugs.
+5. Identify potential bugs, logical issues, or regression risks.
+
+Constraints:
+- You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
+- Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
+- Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
+
+Interaction Flow:
+- You MUST present issues one by one.
+- For each issue, you must output a description/explanation for the user, and you MUST end your message with a JSON block in the following format:
+\`\`\`json
+{
+  "file": "relative/path/to/file",
+  "line": <line_number_in_file>,
+  "message": "A clear, concise, actionable feedback message to be posted as a comment on GitHub."
+}
+\`\`\`
+- Only present ONE issue per turn. Do not present multiple issues at once.
+- The file path must be relative to the repository root and must be one of the files changed in the PR.
+- The line number must be a valid 1-based line number inside the file where the issue occurs (it must be on one of the added or modified lines in the pull request diff).
+- If the user asks questions or provides clarification (e.g. by choosing "write"), answer their question. If you still think there is an issue (or a modified version of it), output the JSON block with the same or updated details. If you realize the issue is not valid after the user's input, explain to the user and ask for the next step.
+- Once you have completed analyzing all changed files and there are no more issues to present, or if the user asks you to go to the next issue but no more issues exist, you MUST output:
+\`\`\`json
+{
+  "no_more_issues": true
+}
+\`\`\`
+and state that there are no further issues.`;
+
 // Helper to log token consumption metrics
 function logTokenUsage(model, usageMetadata) {
 	if (!usageMetadata) return;
@@ -1571,6 +1628,13 @@ async function main() {
 	let pr_review_base_branch = '';
 	let pr_review_temp_dir = '';
 	let user_query = '';
+	let isCommentMode = false;
+	const prComments = [];
+	let lastIssueJson = null;
+	let prOwner = '';
+	let prRepo = '';
+	let prPullNumber = '';
+	let githubFetch;
 
 	// Check if we are in a follow-up session for a PR review
 	const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
@@ -1615,7 +1679,7 @@ async function main() {
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
-  nono --pr-review [url]     Run a GitHub PR review on the specified PR URL
+  nono --pr-review [url] [--comment] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -2044,6 +2108,8 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			process.exit(1);
 		}
 
+		isCommentMode = process.argv.includes('--comment');
+
 		const match = prUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
 		if (!match) {
 			console.error('\x1b[31mError: Invalid Github Pull Request URL.\x1b[0m');
@@ -2053,6 +2119,9 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 
 		const [_, owner, repo, pullNumber] = match;
+		prOwner = owner;
+		prRepo = repo;
+		prPullNumber = pullNumber;
 
 		const githubToken = process.env.GITHUB_ACCESS_TOKEN;
 		if (!githubToken) {
@@ -2064,14 +2133,21 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
 
-		async function githubFetch(url) {
+		githubFetch = async function(url, options = {}) {
+			const headers = {
+				Accept: 'application/vnd.github+json',
+				Authorization: `Bearer ${githubToken}`,
+				'X-GitHub-Api-Version': '2022-11-28',
+				'User-Agent': 'Nono-CLI',
+				...options.headers
+			};
+			if (options.body && !headers['Content-Type']) {
+				headers['Content-Type'] = 'application/json';
+			}
 			const response = await fetch(url, {
-				headers: {
-					Accept: 'application/vnd.github+json',
-					Authorization: `Bearer ${githubToken}`,
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'Nono-CLI'
-				}
+				method: options.method || 'GET',
+				headers,
+				body: options.body
 			});
 			if (!response.ok) {
 				const oauthScopes = response.headers.get('x-oauth-scopes') || 'none';
@@ -2079,7 +2155,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				throw new Error(`GitHub API returned ${response.status}: ${response.statusText}\n  [Diagnostics: Token scopes: "${oauthScopes}", Required/Accepted scopes: "${acceptedScopes}"]`);
 			}
 			return response.json();
-		}
+		};
 
 		try {
 			updateProgress('• Fetching pull request details from GitHub...');
@@ -2138,7 +2214,24 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			}
 
 			is_pr_review = true;
-			user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
+			if (isCommentMode) {
+				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
+Title: ${prTitle}
+Author: ${prAuthor}
+Base branch: ${pr_review_base_branch}
+Compare branch: ${compareBranch}
+
+Here is the list of changed files in this PR (excluding lockfiles):
+${filteredFiles.map(f => `- ${f.filename} (+${f.additions} -${f.deletions})`).join('\n')}
+
+Here is the status of modified files against the base branch:
+\`\`\`
+${repoDiff || 'No differences found.'}
+\`\`\`
+
+Analyze the changed files, trace references in the codebase, identify potential bugs or logic errors, and present the first issue you find. Remember to output the JSON block with the file path, line number, and message for this issue.`;
+			} else {
+				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
 Title: ${prTitle}
 Author: ${prAuthor}
 Base branch: ${pr_review_base_branch}
@@ -2153,6 +2246,7 @@ ${repoDiff || 'No differences found.'}
 \`\`\`
 
 Analyze the changed files, trace references in the codebase, and write your final PR review report in Markdown format.`;
+			}
 
 			// Save metadata to support subsequent follow-up commands in the same shell
 			const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
@@ -2324,7 +2418,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						model: model_name,
 						contents: history,
 						config: {
-							systemInstruction: is_pr_review ? pr_review_system_prompt : system_prompt,
+							systemInstruction: isCommentMode ? pr_review_comment_system_prompt : (is_pr_review ? pr_review_system_prompt : system_prompt),
 							tools: [
 								{
 									functionDeclarations: is_pr_review
@@ -2417,9 +2511,100 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			if (!has_function_calls) {
-				// No functions to call, we have reached the final state
-				await finishProgress(text_part ? text_part.text : 'Task completed.');
-				break;
+				if (isCommentMode) {
+					clearProgress();
+					const elapsed = Math.round((Date.now() - start_time) / 1000);
+					console.log(`\x1b[90m• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
+
+					const text = text_part ? text_part.text : '';
+					const cleanText = text.replace(/```json[\s\S]*?```/, '').trim();
+					if (cleanText) {
+						const formatted = await formatMarkdownForTerminal(cleanText);
+						console.log(`\n\x1b[35m✦\x1b[0m ${formatted}\n`);
+					}
+
+					let issueJson = extractJsonBlock(text);
+					if (issueJson && issueJson.no_more_issues) {
+						console.log('\n\x1b[32m✦ All issues addressed.\x1b[0m\n');
+						break;
+					}
+
+					if (issueJson) {
+						lastIssueJson = issueJson;
+					} else if (lastIssueJson) {
+						issueJson = lastIssueJson;
+					}
+
+					if (issueJson && issueJson.file && issueJson.line && issueJson.message) {
+						console.log(`\x1b[33mProposed Issue:\x1b[0m`);
+						console.log(`  \x1b[1mFile:\x1b[0m ${issueJson.file}`);
+						console.log(`  \x1b[1mLine:\x1b[0m ${issueJson.line}`);
+						console.log(`  \x1b[1mComment:\x1b[0m ${issueJson.message}\n`);
+
+						let validChoice = false;
+						while (!validChoice) {
+							const answer = await askUser('Choose an action [skip (s) / comment (c) / write (w)]: ');
+							const choice = answer.trim().toLowerCase();
+							if (choice === 's' || choice === 'skip') {
+								validChoice = true;
+								lastIssueJson = null;
+								history.push({
+									role: 'user',
+									parts: [{ text: 'User chose to skip this issue. Please present the next issue.' }]
+								});
+								console.log('\x1b[90mSkipping issue...\x1b[0m\n');
+							} else if (choice === 'c' || choice === 'comment') {
+								validChoice = true;
+								lastIssueJson = null;
+								prComments.push({
+									path: issueJson.file,
+									line: issueJson.line,
+									body: issueJson.message
+								});
+								history.push({
+									role: 'user',
+									parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
+								});
+								console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
+							} else if (choice === 'w' || choice === 'write') {
+								validChoice = true;
+								const promptText = await askUser('Enter your prompt / question: ');
+								history.push({
+									role: 'user',
+									parts: [{ text: promptText }]
+								});
+								console.log('\x1b[90mSending prompt to Nono...\x1b[0m\n');
+							} else {
+								console.log('\x1b[31mInvalid choice. Please type "skip", "comment", or "write".\x1b[0m');
+							}
+						}
+					} else {
+						console.log('\x1b[33mWarning: Could not parse issue details from response.\x1b[0m');
+						const promptText = await askUser('Enter your prompt / question, or type "next" to continue: ');
+						if (promptText.trim().toLowerCase() === 'next') {
+							lastIssueJson = null;
+							history.push({
+								role: 'user',
+								parts: [{ text: 'Please present the next issue (or state "No more issues" if there are none).' }]
+							});
+						} else {
+							history.push({
+								role: 'user',
+								parts: [{ text: promptText }]
+							});
+						}
+					}
+
+					pruneHistory(history);
+					fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+
+					start_time = Date.now();
+					continue;
+				} else {
+					// No functions to call, we have reached the final state
+					await finishProgress(text_part ? text_part.text : 'Task completed.');
+					break;
+				}
 			}
 
 			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
@@ -2489,6 +2674,51 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			finishProgressError(err.message || String(err));
 			break;
 		}
+	}
+
+	// Post comments to GitHub Review if comment mode is active
+	if (isCommentMode) {
+		if (prComments.length > 0) {
+			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post. ✦\x1b[0m\n`);
+			const answer = await askUser('Do you want to post the comments and submit requested changes review on the Github PR? (N/y): ');
+			if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
+				updateProgress('• Posting review comments to GitHub...');
+				try {
+					const reviewBody = {
+						body: 'Nono Pull Request Review. Requested changes based on interactive code review.',
+						event: 'REQUEST_CHANGES',
+						comments: prComments.map(c => {
+							const lineVal = parseInt(c.line, 10);
+							const commentObj = {
+								path: c.path,
+								body: c.body
+							};
+							if (!isNaN(lineVal)) {
+								commentObj.line = lineVal;
+								commentObj.side = 'RIGHT';
+							}
+							return commentObj;
+						})
+					};
+
+					await githubFetch(`https://api.github.com/repos/${prOwner}/${prRepo}/pulls/${prPullNumber}/reviews`, {
+						method: 'POST',
+						body: JSON.stringify(reviewBody)
+					});
+
+					console.log('\n\x1b[32m✦ Comments and requested changes review submitted successfully!\x1b[0m\n');
+					playChime('complete');
+				} catch (err) {
+					console.error(`\x1b[31mError submitting PR review: ${err.message || err}\x1b[0m`);
+					playChime('error');
+				}
+			} else {
+				console.log('Submission cancelled.');
+			}
+		} else {
+			console.log('\n\x1b[90m✦ No comments were selected for submission.\x1b[0m\n');
+		}
+		process.exit(0);
 	}
 
 	// Save final history state
