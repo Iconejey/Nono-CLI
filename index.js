@@ -2159,6 +2159,15 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			return response.json();
 		};
 
+		let tempDir;
+		const cleanup = () => {
+			try {
+				if (tempDir && fs.existsSync(tempDir)) {
+					fs.rmSync(tempDir, { recursive: true, force: true });
+				}
+			} catch (e) {}
+		};
+
 		try {
 			updateProgress('• Fetching pull request details from GitHub...');
 			const prData = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`);
@@ -2174,16 +2183,8 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			const filteredFiles = filesData.filter(file => !isIgnoredFile(file.filename));
 
 			updateProgress(`• Cloning repository branch "${compareBranch}" for analysis...`);
-			const tempDir = path.join(os.tmpdir(), `nono-pr-${owner}-${repo}-${pullNumber}-${Date.now()}`);
+			tempDir = path.join(os.tmpdir(), `nono-pr-${owner}-${repo}-${pullNumber}-${Date.now()}`);
 			pr_review_temp_dir = tempDir;
-
-			function cleanup() {
-				try {
-					if (fs.existsSync(tempDir)) {
-						fs.rmSync(tempDir, { recursive: true, force: true });
-					}
-				} catch (e) {}
-			}
 
 			const shellEscape = (arg) => `'` + String(arg).replace(/'/g, "'\\''") + `'`;
 			const cloneUrl = `https://${githubToken}@github.com/${headRepoFullName}.git`;
@@ -2618,9 +2619,12 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				const { name, args, id } = call;
 
 				// Formulate a clean progress line for the tool call
+				let printedProgress = false;
 				if (name !== 'write_file' && name !== 'patch_file') {
 					const tool_progress = formatToolCallProgress(name, args);
-					updateProgress(`• ${tool_progress}`);
+					const progressLine = formatProgressLine(`• ${tool_progress}`);
+					process.stdout.write(progressLine);
+					printedProgress = true;
 				}
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
@@ -2640,7 +2644,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 				// Check if output exceeds 1000 characters
 				const result_str = JSON.stringify(result);
-				if (result_str.length > 1000) {
+				const isSummarized = result_str.length > 1000;
+				if (isSummarized) {
 					pendingSummaryTriggers.push({
 						name,
 						callId: id,
@@ -2650,6 +2655,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						status: 'error',
 						error: `Tool output is too long (${result_str.length} characters). What specific information or pattern are you looking for in this output? Please describe it in your next turn so a sub-agent can extract/summarize it.`
 					};
+				}
+
+				if (printedProgress) {
+					if (isSummarized) {
+						process.stdout.write('\x1b[90m [sum]\x1b[0m\n');
+					} else {
+						process.stdout.write('\n');
+					}
 				}
 
 				const function_response_part = {
