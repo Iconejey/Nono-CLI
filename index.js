@@ -45,20 +45,64 @@ function stripAnsi(str) {
 // Helper to extract JSON block from markdown response
 function extractJsonBlock(text) {
 	if (!text) return null;
-	const regex = /```json\s*([\s\S]*?)\s*```/;
-	const match = text.match(regex);
-	if (match) {
+
+	const tryLooseJsonParse = (str) => {
 		try {
-			return JSON.parse(match[1].trim());
+			return JSON.parse(str);
 		} catch (e) {}
-	}
-	const curlyRegex = /(\{[\s\S]*?\})/;
-	const curlyMatch = text.match(curlyRegex);
-	if (curlyMatch) {
+
+		const cleaned = str.replace(/,\s*([\]}])/g, '$1');
 		try {
-			return JSON.parse(curlyMatch[1].trim());
+			return JSON.parse(cleaned);
 		} catch (e) {}
+
+		try {
+			const fn = new Function(`return (${cleaned});`);
+			const val = fn();
+			if (val && typeof val === 'object') {
+				return val;
+			}
+		} catch (e) {}
+
+		return null;
+	};
+
+	// Try to find all ```json ... ``` blocks
+	const regex = /```json\s*([\s\S]*?)\s*```/g;
+	let match;
+	const blocks = [];
+	while ((match = regex.exec(text)) !== null) {
+		blocks.push(match[1].trim());
 	}
+
+	// Try parsing them in reverse order (last one first)
+	for (let i = blocks.length - 1; i >= 0; i--) {
+		const parsed = tryLooseJsonParse(blocks[i]);
+		if (parsed) return parsed;
+	}
+
+	// Fallback: try to find curly braces in reverse
+	const curlyRegex = /(\{[\s\S]*?\})/g;
+	const curlyMatches = text.match(curlyRegex);
+	if (curlyMatches) {
+		for (let i = curlyMatches.length - 1; i >= 0; i--) {
+			const parsed = tryLooseJsonParse(curlyMatches[i]);
+			if (parsed) return parsed;
+		}
+	}
+
+	// Another fallback: scan for any JSON-like structure from the end of the text
+	const lastBrace = text.lastIndexOf('}');
+	if (lastBrace !== -1) {
+		const firstBrace = text.lastIndexOf('{', lastBrace);
+		if (firstBrace !== -1 && firstBrace < lastBrace) {
+			const candidate = text.substring(firstBrace, lastBrace + 1);
+			const parsed = tryLooseJsonParse(candidate);
+			if (parsed) return parsed;
+		}
+	}
+
+	writeDetails(`[JSON Parse Failure] Failed to parse JSON block from: \n${text}\n`);
 	return null;
 }
 
