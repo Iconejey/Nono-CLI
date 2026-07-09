@@ -1603,6 +1603,7 @@ Interaction Flow:
 {
   "file": "relative/path/to/file",
   "line": <line_number_in_file>,
+  "severity": "critical" | "high" | "medium" | "low",
   "message": "A clear, concise, actionable feedback message to be posted as a comment on GitHub."
 }
 \`\`\`
@@ -1681,6 +1682,7 @@ async function main() {
 	let pr_review_temp_dir = '';
 	let user_query = '';
 	let isCommentMode = false;
+	let isAutoMode = false;
 	const prComments = [];
 	let lastIssueJson = null;
 	let prOwner = '';
@@ -1731,7 +1733,7 @@ async function main() {
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
-  nono --pr-review [url] [--comment] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection
+  nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -2156,12 +2158,13 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		const prUrl = process.argv[3];
 		if (!prUrl) {
 			console.error('\x1b[31mError: Pull request URL is required.\x1b[0m');
-			console.error('Usage: nono --pr-review <github-pr-url>');
+			console.error('Usage: nono --pr-review <github-pr-url> [--comment] [--auto]');
 			playChime('error');
 			process.exit(1);
 		}
 
-		isCommentMode = process.argv.includes('--comment');
+		isCommentMode = process.argv.includes('--comment') || process.argv.includes('--auto');
+		isAutoMode = process.argv.includes('--auto');
 
 		const match = prUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
 		if (!match) {
@@ -2610,59 +2613,87 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						console.log(`\x1b[33mProposed Issue:\x1b[0m`);
 						console.log(`  \x1b[1mFile:\x1b[0m ${issueJson.file}`);
 						console.log(`  \x1b[1mLine:\x1b[0m ${issueJson.line}`);
+						if (issueJson.severity) {
+							console.log(`  \x1b[1mSeverity:\x1b[0m ${issueJson.severity.toUpperCase()}`);
+						}
 						console.log(`  \x1b[1mComment:\x1b[0m ${issueJson.message}\n`);
 
-						let validChoice = false;
-						while (!validChoice) {
-							const answer = await askUser('Choose an action [skip (s) / comment (c) / write (w)]: ');
-							const choice = answer.trim().toLowerCase();
-							if (choice === 's' || choice === 'skip') {
-								validChoice = true;
-								lastIssueJson = null;
-								history.push({
-									role: 'user',
-									parts: [{ text: 'User chose to skip this issue. Please present the next issue.' }]
-								});
-								console.log('\x1b[90mSkipping issue...\x1b[0m\n');
-							} else if (choice === 'c' || choice === 'comment') {
-								validChoice = true;
-								lastIssueJson = null;
-								prComments.push({
-									path: issueJson.file,
-									line: issueJson.line,
-									body: issueJson.message
-								});
-								history.push({
-									role: 'user',
-									parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
-								});
-								console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
-							} else if (choice === 'w' || choice === 'write') {
-								validChoice = true;
-								const promptText = await askUser('Enter your prompt / question: ');
-								history.push({
-									role: 'user',
-									parts: [{ text: promptText }]
-								});
-								console.log('\x1b[90mSending prompt to Nono...\x1b[0m\n');
-							} else {
-								console.log('\x1b[31mInvalid choice. Please type "skip", "comment", or "write".\x1b[0m');
+						if (isAutoMode) {
+							lastIssueJson = null;
+							const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
+							prComments.push({
+								path: issueJson.file,
+								line: issueJson.line,
+								body: `${severityStr}${issueJson.message}`
+							});
+							history.push({
+								role: 'user',
+								parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
+							});
+							console.log(`\x1b[32mAutomatically saved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
+						} else {
+							let validChoice = false;
+							while (!validChoice) {
+								const answer = await askUser('Choose an action [skip (s) / comment (c) / write (w)]: ');
+								const choice = answer.trim().toLowerCase();
+								if (choice === 's' || choice === 'skip') {
+									validChoice = true;
+									lastIssueJson = null;
+									history.push({
+										role: 'user',
+										parts: [{ text: 'User chose to skip this issue. Please present the next issue.' }]
+									});
+									console.log('\x1b[90mSkipping issue...\x1b[0m\n');
+								} else if (choice === 'c' || choice === 'comment') {
+									validChoice = true;
+									lastIssueJson = null;
+									const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
+									prComments.push({
+										path: issueJson.file,
+										line: issueJson.line,
+										body: `${severityStr}${issueJson.message}`
+									});
+									history.push({
+										role: 'user',
+										parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
+									});
+									console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
+								} else if (choice === 'w' || choice === 'write') {
+									validChoice = true;
+									const promptText = await askUser('Enter your prompt / question: ');
+									history.push({
+										role: 'user',
+										parts: [{ text: promptText }]
+									});
+									console.log('\x1b[90mSending prompt to Nono...\x1b[0m\n');
+								} else {
+									console.log('\x1b[31mInvalid choice. Please type "skip", "comment", or "write".\x1b[0m');
+								}
 							}
 						}
 					} else {
 						console.log('\x1b[33mWarning: Could not parse issue details from response.\x1b[0m');
-						const promptText = await askUser('Enter your prompt / question, or type "next" to continue: ');
-						if (promptText.trim().toLowerCase() === 'next') {
+						if (isAutoMode) {
 							lastIssueJson = null;
 							history.push({
 								role: 'user',
 								parts: [{ text: 'Please present the next issue (or state "No more issues" if there are none).' }]
 							});
+							console.log('\x1b[90mAutomatically proceeding to next issue...\x1b[0m\n');
 						} else {
-							history.push({
-								role: 'user',
-								parts: [{ text: promptText }]
-							});
+							const promptText = await askUser('Enter your prompt / question, or type "next" to continue: ');
+							if (promptText.trim().toLowerCase() === 'next') {
+								lastIssueJson = null;
+								history.push({
+									role: 'user',
+									parts: [{ text: 'Please present the next issue (or state "No more issues" if there are none).' }]
+								});
+							} else {
+								history.push({
+									role: 'user',
+									parts: [{ text: promptText }]
+								});
+							}
 						}
 					}
 
@@ -2763,8 +2794,18 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	if (isCommentMode) {
 		if (prComments.length > 0) {
 			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post. ✦\x1b[0m\n`);
-			const answer = await askUser('Do you want to post the comments and submit requested changes review on the Github PR? (N/y): ');
-			if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
+			let shouldPost = false;
+			if (isAutoMode) {
+				shouldPost = true;
+				console.log('Auto mode active: Posting comments automatically...');
+			} else {
+				const answer = await askUser('Do you want to post the comments and submit requested changes review on the Github PR? (N/y): ');
+				if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
+					shouldPost = true;
+				}
+			}
+
+			if (shouldPost) {
 				updateProgress('• Posting review comments to GitHub...');
 				try {
 					const reviewBody = {
