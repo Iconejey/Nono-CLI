@@ -2833,8 +2833,69 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					console.log('\n\x1b[32m✦ Comments and requested changes review submitted successfully!\x1b[0m\n');
 					playChime('complete');
 				} catch (err) {
-					console.error(`\x1b[31mError submitting PR review: ${err.message || err}\x1b[0m`);
-					playChime('error');
+					console.log(`\n\x1b[33m• Direct review submission failed (${err.message || err}).\x1b[0m`);
+					console.log(`\x1b[90mRetrying with individual comment validation fallback...\x1b[0m`);
+
+					try {
+						// 1. Get HEAD commit SHA
+						let commit_id;
+						try {
+							commit_id = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+						} catch (e) {
+							// Omit commit_id if git rev-parse fails
+						}
+
+						// 2. Create review in PENDING state
+						const pendingReview = await githubFetch(`https://api.github.com/repos/${prOwner}/${prRepo}/pulls/${prPullNumber}/reviews`, {
+							method: 'POST',
+							body: JSON.stringify({
+								body: 'Nono Pull Request Review. Requested changes based on interactive code review.'
+							})
+						});
+						const reviewId = pendingReview.id;
+
+						// 3. Post comments one by one to the pending review
+						let successCount = 0;
+						for (const c of prComments) {
+							const lineVal = parseInt(c.line, 10);
+							const commentObj = {
+								path: c.path,
+								body: c.body
+							};
+							if (!isNaN(lineVal)) {
+								commentObj.line = lineVal;
+								commentObj.side = 'RIGHT';
+							}
+							if (commit_id) {
+								commentObj.commit_id = commit_id;
+							}
+							try {
+								await githubFetch(`https://api.github.com/repos/${prOwner}/${prRepo}/pulls/${prPullNumber}/reviews/${reviewId}/comments`, {
+									method: 'POST',
+									body: JSON.stringify(commentObj)
+								});
+								console.log(`\x1b[90m  • Attached comment: ${c.path}:${c.line}\x1b[0m`);
+								successCount++;
+							} catch (commentErr) {
+								console.log(`\x1b[31m  • Warning: Skipped comment on ${c.path}:${c.line} (Line not in PR diff or invalid)\x1b[0m`);
+							}
+						}
+
+						// 4. Submit the pending review
+						await githubFetch(`https://api.github.com/repos/${prOwner}/${prRepo}/pulls/${prPullNumber}/reviews/${reviewId}/events`, {
+							method: 'POST',
+							body: JSON.stringify({
+								event: 'REQUEST_CHANGES',
+								body: 'Nono Pull Request Review. Requested changes based on interactive code review.'
+							})
+						});
+
+						console.log(`\n\x1b[32m✦ Review submitted successfully! Posted ${successCount} of ${prComments.length} comments.\x1b[0m\n`);
+						playChime('complete');
+					} catch (fallbackErr) {
+						console.error(`\x1b[31mError submitting review during fallback: ${fallbackErr.message || fallbackErr}\x1b[0m`);
+						playChime('error');
+					}
 				}
 			} else {
 				console.log('Submission cancelled.');
