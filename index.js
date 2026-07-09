@@ -23,6 +23,8 @@ const api_key = process.env.GEMINI_API_KEY;
 const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
+const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
+const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 
 if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
@@ -1550,6 +1552,7 @@ CRITICAL INSTRUCTIONS:
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
+- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 
 Guidelines:
@@ -1573,6 +1576,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
+- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
 
 Provide your final report as your final text message without calling any more tools.`;
 
@@ -1590,6 +1594,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
+- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
 
 Interaction Flow:
 - You MUST present issues one by one.
@@ -2703,9 +2708,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
-				// Check if output exceeds 1000 characters
+				// Check if output exceeds the configured limit
 				const result_str = JSON.stringify(result);
-				const isSummarized = result_str.length > 1000;
+				const isSummarized = result_str.length > output_limit;
 				if (isSummarized) {
 					pendingSummaryTriggers.push({
 						name,
@@ -2714,7 +2719,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					});
 					result = {
 						status: 'error',
-						error: `Tool output is too long (${result_str.length} characters). What specific information or pattern are you looking for in this output? Please describe it in your next turn so a sub-agent can extract/summarize it.`
+						error: `Tool output is too long (${result_str.length} characters, limit is ${output_limit} characters). What specific information or pattern are you looking for in this output? Please describe it in your next turn so a sub-agent can extract/summarize it.`
 					};
 				}
 
