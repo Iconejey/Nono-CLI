@@ -1368,11 +1368,13 @@ function isIgnoredFile(filepath) {
 }
 
 function viewFileGitDiff({ base_branch, file_path }) {
-	if (isIgnoredFile(file_path)) {
+	if (file_path && isIgnoredFile(file_path)) {
 		return Promise.resolve({ status: 'success', diff: '(Diff ignored for lockfile)' });
 	}
 	return new Promise(resolve => {
-		const cmd = `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}`;
+		const cmd = file_path
+			? `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}`
+			: `git diff origin/${base_branch}...HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`;
 		exec(cmd, { timeout: 10000 }, (error, stdout, stderr) => {
 			if (error && error.code !== 1) {
 				resolve({ status: 'error', error: stderr || error.message });
@@ -1525,14 +1527,14 @@ const tools_declarations = [
 
 const view_file_git_diff_declaration = {
 	name: 'view_file_git_diff',
-	description: 'Shows the line-by-line git diff of a specific file in the PR branch compared to the base branch.',
+	description: 'Shows the line-by-line git diff of a specific file in the PR branch compared to the base branch, or the entire PR git diff if file_path is omitted.',
 	parameters: {
 		type: 'OBJECT',
 		properties: {
 			base_branch: { type: 'STRING', description: 'The base branch of the PR.' },
-			file_path: { type: 'STRING', description: 'The relative path of the file to inspect.' }
+			file_path: { type: 'STRING', description: 'The relative path of the file to inspect. If omitted, returns the diff for all changed files.' }
 		},
-		required: ['base_branch', 'file_path']
+		required: ['base_branch']
 	}
 };
 
@@ -1561,8 +1563,8 @@ You are running in a temporary clone of the repository.
 
 Your objectives:
 1. Identify the changed files and overall repository diff from your initial prompt context.
-2. Use "view_file_git_diff" to see the specific changes in each file.
-3. For modified files, trace their dependencies and usage patterns in the codebase using "search_grep" and "view_file_contents".
+2. Use "view_file_git_diff" (preferably without a file_path to fetch all changes at once in a single call) to see the specific code changes.
+3. Keep the analysis highly focused and light-weight: do NOT use "search_grep" or "view_file_contents" to trace dependencies unless you suspect a high-impact bug, architectural regression, or API misalignment.
 4. Focus on deep code logic, API consistency, performance issues, architectural alignments, or potential logical bugs.
 5. Identify potential bugs, logical issues, or regression risks.
 6. Compile a comprehensive, professional PR review report in Markdown format.
@@ -1579,14 +1581,14 @@ You are running in a temporary clone of the repository.
 
 Your objectives:
 1. Identify the changed files and overall repository diff from your initial prompt context.
-2. Use "view_file_git_diff" to see the specific changes in each file.
-3. For modified files, trace their dependencies and usage patterns in the codebase using "search_grep" and "view_file_contents".
+2. Use "view_file_git_diff" (preferably without a file_path to fetch all changes at once in a single call) to see the specific code changes.
+3. Keep the analysis highly focused and light-weight: do NOT use "search_grep" or "view_file_contents" to trace dependencies unless you suspect a high-impact bug, architectural regression, or API misalignment.
 4. Focus on deep code logic, API consistency, performance issues, architectural alignments, or potential logical bugs.
 5. Identify potential bugs, logical issues, or regression risks.
 
 Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
-- Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
+- Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
 
 Interaction Flow:
@@ -2260,6 +2262,21 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				}).join('\n');
 			}
 
+			// Fetch the full diff (excluding lockfiles) to include in prompt if small
+			let fullGitDiff = '';
+			try {
+				fullGitDiff = execSync(`git diff origin/${pr_review_base_branch}...HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`, { encoding: 'utf8' }).trim();
+			} catch (e) {
+				try {
+					fullGitDiff = execSync(`git diff origin/${pr_review_base_branch} HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`, { encoding: 'utf8' }).trim();
+				} catch (e2) {}
+			}
+
+			let diffContext = '';
+			if (fullGitDiff && fullGitDiff.length < 15000) {
+				diffContext = `\nHere is the full git diff for this PR:\n\`\`\`diff\n${fullGitDiff}\n\`\`\`\n`;
+			}
+
 			is_pr_review = true;
 			if (isCommentMode) {
 				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
@@ -2275,8 +2292,8 @@ Here is the status of modified files against the base branch:
 \`\`\`
 ${repoDiff || 'No differences found.'}
 \`\`\`
-
-Analyze the changed files, trace references in the codebase, identify potential bugs or logic errors, and present the first issue you find. Remember to output the JSON block with the file path, line number, and message for this issue.`;
+${diffContext}
+Analyze the changed files, identify potential bugs or logic errors, and present the first issue you find. Remember to output the JSON block with the file path, line number, and message for this issue.`;
 			} else {
 				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
 Title: ${prTitle}
@@ -2291,7 +2308,7 @@ Here is the status of modified files against the base branch:
 \`\`\`
 ${repoDiff || 'No differences found.'}
 \`\`\`
-
+${diffContext}
 Analyze the changed files, trace references in the codebase, and write your final PR review report in Markdown format.`;
 			}
 
