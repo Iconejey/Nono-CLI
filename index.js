@@ -1625,6 +1625,7 @@ async function main() {
 	} catch (e) {}
 
 	let is_pr_review = false;
+	let is_initial_pr_review = false;
 	let pr_review_base_branch = '';
 	let pr_review_temp_dir = '';
 	let user_query = '';
@@ -2100,6 +2101,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 	// Handle nono --pr-review <pr-url> command
 	if (process.argv[2] === '--pr-review' || process.argv[2] === 'pr-review') {
+		is_initial_pr_review = true;
 		const prUrl = process.argv[3];
 		if (!prUrl) {
 			console.error('\x1b[31mError: Pull request URL is required.\x1b[0m');
@@ -2264,7 +2266,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	}
 
 	// Capture CLI arguments
-	if (!is_pr_review) {
+	if (!is_initial_pr_review) {
 		if (process.argv[2] === '--full' || process.argv[2] === '-f') {
 			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
 			try {
@@ -2372,7 +2374,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		? path.join(cache_dir, `session-pr-${process.ppid}.json`)
 		: path.join(cache_dir, `session-${process.ppid}.json`);
 	let history = [];
-	if (!is_pr_review && fs.existsSync(session_path)) {
+	if (!is_initial_pr_review && fs.existsSync(session_path)) {
 		try {
 			history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
 		} catch (e) {
@@ -2401,7 +2403,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
-	if (is_pr_review) {
+	if (is_initial_pr_review) {
 		console.log('\x1b[90m✦ Starting analysis...\x1b[0m');
 	}
 
@@ -2418,10 +2420,12 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						model: model_name,
 						contents: history,
 						config: {
-							systemInstruction: isCommentMode ? pr_review_comment_system_prompt : (is_pr_review ? pr_review_system_prompt : system_prompt),
+							systemInstruction: is_initial_pr_review
+								? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt)
+								: system_prompt,
 							tools: [
 								{
-									functionDeclarations: is_pr_review
+									functionDeclarations: is_initial_pr_review
 										? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
 										: tools_declarations
 								},
