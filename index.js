@@ -26,7 +26,7 @@ const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, defau
 const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
 const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -551,6 +551,93 @@ async function formatMarkdownForTerminal(md) {
 	}
 
 	return formatted_lines.join('\n');
+}
+
+function findSessionModelMessages() {
+	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
+	if (!fs.existsSync(cache_dir)) return [];
+
+	const files = fs.readdirSync(cache_dir);
+	const sessionFiles = files
+		.filter(file => (file.startsWith('session-') || file.startsWith('session-pr-')) && file.endsWith('.json'))
+		.map(file => {
+			const filePath = path.join(cache_dir, file);
+			const stat = fs.statSync(filePath);
+			return { path: filePath, mtime: stat.mtimeMs };
+		});
+
+	if (sessionFiles.length === 0) return [];
+
+	sessionFiles.sort((a, b) => b.mtime - a.mtime);
+
+	for (const sessionFile of sessionFiles) {
+		try {
+			const history = JSON.parse(fs.readFileSync(sessionFile.path, 'utf8'));
+			if (Array.isArray(history)) {
+				const modelTexts = [];
+				for (const msg of history) {
+					if (msg && msg.role === 'model' && Array.isArray(msg.parts)) {
+						const textPart = msg.parts.find(p => p.text);
+						if (textPart && textPart.text.trim()) {
+							modelTexts.push(textPart.text.trim());
+						}
+					}
+				}
+				if (modelTexts.length > 0) {
+					return modelTexts;
+				}
+			}
+		} catch (e) {
+			// ignore corrupt files
+		}
+	}
+	return [];
+}
+
+async function highlightRawMarkdown(md) {
+	if (!md) return '';
+	const lines = md.split('\n');
+	const output_lines = [];
+	let in_code_block = false;
+	let code_block_lines = [];
+	let code_block_lang = '';
+
+	for (let line of lines) {
+		if (line.trim().startsWith('```')) {
+			if (!in_code_block) {
+				in_code_block = true;
+				code_block_lang = line.trim().slice(3).trim();
+				code_block_lines = [];
+				// Highlight the code block opening tag as markdown
+				output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+			} else {
+				in_code_block = false;
+				const code_text = code_block_lines.join('\n');
+				const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
+				let highlighted_text = code_text;
+				if (is_highlighted) {
+					try {
+						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
+						highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+					} catch (e) {
+						// fallback
+					}
+				}
+				output_lines.push(highlighted_text.trimEnd());
+				// Highlight the code block closing tag as markdown
+				output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+			}
+			continue;
+		}
+
+		if (in_code_block) {
+			code_block_lines.push(line);
+		} else {
+			// Highlight standard markdown line
+			output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+		}
+	}
+	return output_lines.join('\n');
 }
 
 function updateProgress(raw_text) {
@@ -1734,6 +1821,7 @@ async function main() {
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
+  nono --raw                 Print the last final message in raw markdown with syntax highlighting
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -2150,6 +2238,29 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			console.error(`No details log found for this terminal session.`);
 			process.exit(1);
 		}
+	}
+
+	// Handle nono --raw argument
+	if (process.argv[2] === '--raw') {
+		const messages = findSessionModelMessages();
+		if (messages.length > 0) {
+			try {
+				const highlightedMessages = [];
+				for (const msg of messages) {
+					const highlighted = await highlightRawMarkdown(msg);
+					highlightedMessages.push(highlighted);
+				}
+				console.log(highlightedMessages.join('\n\n'));
+			} catch (err) {
+				// Fallback to plain text if highlighting fails
+				console.log(messages.join('\n\n'));
+			}
+			process.exit(0);
+		} else {
+			console.error('\x1b[31mError: No previous final message found in session history.\x1b[0m');
+			process.exit(1);
+		}
+		return;
 	}
 
 	// Handle nono --pr-review <pr-url> command
