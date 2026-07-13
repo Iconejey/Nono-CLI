@@ -553,6 +553,40 @@ async function formatMarkdownForTerminal(md) {
 	return formatted_lines.join('\n');
 }
 
+function getPRNameFromPPID(ppid) {
+	if (!ppid) return null;
+	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
+	const prMetaPath = path.join(cache_dir, `pr-meta-${ppid}.json`);
+	if (fs.existsSync(prMetaPath)) {
+		try {
+			const meta = JSON.parse(fs.readFileSync(prMetaPath, 'utf8'));
+			if (meta) {
+				if (meta.owner && meta.repo && meta.pullNumber) {
+					return `${meta.owner}/${meta.repo}#${meta.pullNumber}`;
+				}
+				if (meta.tempDir) {
+					const folderName = path.basename(meta.tempDir);
+					// Format: nono-pr-owner-repo-pullNumber-timestamp
+					const match = folderName.match(/nono-pr-(.+)-([0-9]+)-([0-9]+)$/);
+					if (match) {
+						const ownerRepo = match[1];
+						const pullNumber = match[2];
+						const firstHyphenIdx = ownerRepo.indexOf('-');
+						if (firstHyphenIdx !== -1) {
+							const owner = ownerRepo.substring(0, firstHyphenIdx);
+							const repo = ownerRepo.substring(firstHyphenIdx + 1);
+							return `${owner}/${repo}#${pullNumber}`;
+						}
+					}
+				}
+			}
+		} catch (e) {
+			// ignore
+		}
+	}
+	return null;
+}
+
 function findSessionModelMessages() {
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
 	if (!fs.existsSync(cache_dir)) return [];
@@ -1707,7 +1741,7 @@ Interaction Flow:
 and state that there are no further issues.`;
 
 // Helper to log token consumption metrics
-function logTokenUsage(model, usageMetadata) {
+function logTokenUsage(model, usageMetadata, prompt) {
 	if (!usageMetadata) return;
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
 	if (!fs.existsSync(cache_dir)) {
@@ -1722,13 +1756,24 @@ function logTokenUsage(model, usageMetadata) {
 			// ignore corrupt file
 		}
 	}
+	let loggedPrompt = prompt || '';
+	if (loggedPrompt.startsWith('Perform a pull request review for the Github Pull Request:')) {
+		const match = loggedPrompt.match(/Perform a pull request review for the Github Pull Request:\s*([^\n\s.]+)/);
+		if (match) {
+			loggedPrompt = `PR review ${match[1]}`;
+		} else {
+			loggedPrompt = 'PR review';
+		}
+	}
 	const record = {
 		timestamp: new Date().toISOString(),
 		ppid: process.ppid,
+		pid: process.pid,
 		model: model,
 		promptTokenCount: usageMetadata.promptTokenCount || 0,
 		candidatesTokenCount: usageMetadata.candidatesTokenCount || 0,
-		cachedContentTokenCount: usageMetadata.cachedContentTokenCount || 0
+		cachedContentTokenCount: usageMetadata.cachedContentTokenCount || 0,
+		prompt: loggedPrompt
 	};
 	logs.push(record);
 	try {
@@ -1816,7 +1861,7 @@ async function main() {
   nono                       Start Nono in interactive mode
   nono [prompt]              Run a prompt directly from the command line
   nono --full, -f            Open a temp file in vim to write a prompt
-  nono --usage               Display token consumption and estimated costs
+  nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
@@ -2045,6 +2090,148 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 		if (logs.length === 0) {
 			console.log('No usage yet');
+			process.exit(0);
+		}
+
+		let listCount = null;
+		const listIdx = process.argv.findIndex(arg => arg === '--list' || arg === '-l');
+		if (listIdx !== -1) {
+			listCount = 10;
+			if (listIdx < process.argv.length - 1) {
+				const count = parseInt(process.argv[listIdx + 1], 10);
+				if (!isNaN(count) && count > 0) {
+					listCount = count;
+				}
+			}
+		}
+
+		if (listCount !== null) {
+			const currency = process.env.NONO_CURRENCY || '€';
+			const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
+			const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
+			const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
+
+			// Group logs by run (pid) or contiguous timestamps (legacy)
+			const groupedLogs = [];
+			let currentGroup = null;
+
+			for (const log of logs) {
+				const hasPid = typeof log.pid === 'number';
+				const logTime = new Date(log.timestamp).getTime();
+
+				let shouldGroup = false;
+
+				if (currentGroup) {
+					if (hasPid && currentGroup.pid === log.pid) {
+						shouldGroup = true;
+					} else if (!hasPid && !currentGroup.pid && currentGroup.ppid === log.ppid) {
+						const groupTime = new Date(currentGroup.timestamp).getTime();
+						if (Math.abs(logTime - groupTime) < 300000) {
+							shouldGroup = true;
+						}
+					}
+				}
+
+				if (shouldGroup && currentGroup) {
+					currentGroup.promptTokenCount += (log.promptTokenCount || 0);
+					currentGroup.candidatesTokenCount += (log.candidatesTokenCount || 0);
+					currentGroup.cachedContentTokenCount += (log.cachedContentTokenCount || 0);
+					if (!currentGroup.prompt && log.prompt) {
+						currentGroup.prompt = log.prompt;
+					}
+				} else {
+					currentGroup = {
+						timestamp: log.timestamp,
+						ppid: log.ppid,
+						pid: log.pid,
+						model: log.model,
+						promptTokenCount: log.promptTokenCount || 0,
+						candidatesTokenCount: log.candidatesTokenCount || 0,
+						cachedContentTokenCount: log.cachedContentTokenCount || 0,
+						prompt: log.prompt || ''
+					};
+					groupedLogs.push(currentGroup);
+				}
+			}
+
+			const lastLogs = groupedLogs.slice(-listCount);
+
+			console.log(`\n\x1b[35m=== Last ${lastLogs.length} Prompts Cost ===\x1b[0m\n`);
+
+			const headers = ['Day Time', 'Prompt (truncated to 60 chars)', 'Cost'];
+			const colWidths = [19, 60, 10];
+
+			const pad = (str, length, align = 'left') => {
+				str = String(str);
+				if (str.length >= length) return str.slice(0, length);
+				const diff = length - str.length;
+				if (align === 'right') {
+					return ' '.repeat(diff) + str;
+				}
+				return str + ' '.repeat(diff);
+			};
+
+			const headerStr =
+				pad(headers[0], colWidths[0], 'left') + ' | ' +
+				pad(headers[1], colWidths[1], 'left') + ' | ' +
+				pad(headers[2], colWidths[2], 'right');
+			console.log(`\x1b[1;37m${headerStr}\x1b[0m`);
+
+			const separator =
+				'─'.repeat(colWidths[0]) + '─+─' +
+				'─'.repeat(colWidths[1]) + '─+─' +
+				'─'.repeat(colWidths[2]);
+			console.log(`\x1b[90m${separator}\x1b[0m`);
+
+			let totalCostSum = 0;
+
+			for (const log of lastLogs) {
+				const d = new Date(log.timestamp);
+				const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+				const inputVal = (log.promptTokenCount || 0) - (log.cachedContentTokenCount || 0);
+				const cacheVal = log.cachedContentTokenCount || 0;
+				const outputVal = log.candidatesTokenCount || 0;
+
+				const costInput = (inputVal * priceInput) / 1000000;
+				const costCache = (cacheVal * priceCache) / 1000000;
+				const costOutput = (outputVal * priceOutput) / 1000000;
+				const totalCost = costInput + costCache + costOutput;
+
+				totalCostSum += totalCost;
+
+				let displayPrompt = log.prompt || '';
+				if (!displayPrompt) {
+					if (log.cachedContentTokenCount > 0 || log.promptTokenCount > 5000) {
+						const legacyPrName = getPRNameFromPPID(log.ppid);
+						displayPrompt = legacyPrName ? `PR review ${legacyPrName}` : 'PR review';
+					} else {
+						displayPrompt = `(${log.model || 'unknown model'})`;
+					}
+				}
+				displayPrompt = displayPrompt.replace(/\s+/g, ' ');
+				if (displayPrompt.length > colWidths[1]) {
+					displayPrompt = displayPrompt.slice(0, colWidths[1] - 3) + '...';
+				}
+
+				const formattedCost = `${totalCost.toFixed(2)}${currency}`;
+
+				const line =
+					pad(dateStr, colWidths[0], 'left') + ' | ' +
+					pad(displayPrompt, colWidths[1], 'left') + ' | ' +
+					pad(formattedCost, colWidths[2], 'right');
+				console.log(line);
+			}
+
+			console.log(`\x1b[90m${separator}\x1b[0m`);
+
+			const totalCostStr = `${totalCostSum.toFixed(2)}${currency}`;
+			const totalLine =
+				pad('Total', colWidths[0], 'left') + ' | ' +
+				pad('-', colWidths[1], 'left') + ' | ' +
+				pad(totalCostStr, colWidths[2], 'right');
+			console.log(`\x1b[1m${totalLine}\x1b[0m\n`);
+
 			process.exit(0);
 		}
 
@@ -2435,7 +2622,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
 			fs.writeFileSync(prMetaPath, JSON.stringify({
 				tempDir,
-				baseBranch: pr_review_base_branch
+				baseBranch: pr_review_base_branch,
+				owner,
+				repo,
+				pullNumber
 			}), 'utf8');
 
 		} catch (err) {
@@ -2636,7 +2826,20 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			if (response.usageMetadata) {
-				logTokenUsage(model_name, response.usageMetadata);
+				let currentPrompt = user_query;
+				if (!currentPrompt) {
+					for (let i = history.length - 1; i >= 0; i--) {
+						if (history[i].role === 'user' && Array.isArray(history[i].parts)) {
+							const textPart = history[i].parts.find(p => p.text);
+							if (textPart && textPart.text) {
+								currentPrompt = textPart.text;
+								break;
+							}
+						}
+					}
+				}
+				const cleanPromptText = (currentPrompt || '').split('\n\n[')[0].split('\n[')[0].trim();
+				logTokenUsage(model_name, response.usageMetadata, cleanPromptText);
 			}
 
 			const candidate = response.candidates?.[0];
