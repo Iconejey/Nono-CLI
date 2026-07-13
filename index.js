@@ -48,7 +48,7 @@ function stripAnsi(str) {
 function extractJsonBlock(text) {
 	if (!text) return null;
 
-	const tryLooseJsonParse = (str) => {
+	const tryLooseJsonParse = str => {
 		try {
 			return JSON.parse(str);
 		} catch (e) {}
@@ -1495,9 +1495,7 @@ function viewFileGitDiff({ base_branch, file_path }) {
 		return Promise.resolve({ status: 'success', diff: '(Diff ignored for lockfile)' });
 	}
 	return new Promise(resolve => {
-		const cmd = file_path
-			? `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}`
-			: `git diff origin/${base_branch}...HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`;
+		const cmd = file_path ? `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}` : `git diff origin/${base_branch}...HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`;
 		exec(cmd, { timeout: 10000 }, (error, stdout, stderr) => {
 			if (error && error.code !== 1) {
 				resolve({ status: 'error', error: stderr || error.message });
@@ -1861,6 +1859,7 @@ async function main() {
   nono                       Start Nono in interactive mode
   nono [prompt]              Run a prompt directly from the command line
   nono --full, -f            Open a temp file in vim to write a prompt
+  nono --selection, -s       Retrieve VSCode selection and use it as context with its file path
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --details             Open the logs and details of the current session in VS Code
@@ -2133,9 +2132,9 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				}
 
 				if (shouldGroup && currentGroup) {
-					currentGroup.promptTokenCount += (log.promptTokenCount || 0);
-					currentGroup.candidatesTokenCount += (log.candidatesTokenCount || 0);
-					currentGroup.cachedContentTokenCount += (log.cachedContentTokenCount || 0);
+					currentGroup.promptTokenCount += log.promptTokenCount || 0;
+					currentGroup.candidatesTokenCount += log.candidatesTokenCount || 0;
+					currentGroup.cachedContentTokenCount += log.cachedContentTokenCount || 0;
 					if (!currentGroup.prompt && log.prompt) {
 						currentGroup.prompt = log.prompt;
 					}
@@ -2171,16 +2170,10 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 				return str + ' '.repeat(diff);
 			};
 
-			const headerStr =
-				pad(headers[0], colWidths[0], 'left') + ' | ' +
-				pad(headers[1], colWidths[1], 'left') + ' | ' +
-				pad(headers[2], colWidths[2], 'right');
+			const headerStr = pad(headers[0], colWidths[0], 'left') + ' | ' + pad(headers[1], colWidths[1], 'left') + ' | ' + pad(headers[2], colWidths[2], 'right');
 			console.log(`\x1b[1;37m${headerStr}\x1b[0m`);
 
-			const separator =
-				'─'.repeat(colWidths[0]) + '─+─' +
-				'─'.repeat(colWidths[1]) + '─+─' +
-				'─'.repeat(colWidths[2]);
+			const separator = '─'.repeat(colWidths[0]) + '─+─' + '─'.repeat(colWidths[1]) + '─+─' + '─'.repeat(colWidths[2]);
 			console.log(`\x1b[90m${separator}\x1b[0m`);
 
 			let totalCostSum = 0;
@@ -2216,20 +2209,14 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 				const formattedCost = `${totalCost.toFixed(2)}${currency}`;
 
-				const line =
-					pad(dateStr, colWidths[0], 'left') + ' | ' +
-					pad(displayPrompt, colWidths[1], 'left') + ' | ' +
-					pad(formattedCost, colWidths[2], 'right');
+				const line = pad(dateStr, colWidths[0], 'left') + ' | ' + pad(displayPrompt, colWidths[1], 'left') + ' | ' + pad(formattedCost, colWidths[2], 'right');
 				console.log(line);
 			}
 
 			console.log(`\x1b[90m${separator}\x1b[0m`);
 
 			const totalCostStr = `${totalCostSum.toFixed(2)}${currency}`;
-			const totalLine =
-				pad('Total', colWidths[0], 'left') + ' | ' +
-				pad('-', colWidths[1], 'left') + ' | ' +
-				pad(totalCostStr, colWidths[2], 'right');
+			const totalLine = pad('Total', colWidths[0], 'left') + ' | ' + pad('-', colWidths[1], 'left') + ' | ' + pad(totalCostStr, colWidths[2], 'right');
 			console.log(`\x1b[1m${totalLine}\x1b[0m\n`);
 
 			process.exit(0);
@@ -2487,7 +2474,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
 
-		githubFetch = async function(url, options = {}) {
+		githubFetch = async function (url, options = {}) {
 			const headers = {
 				Accept: 'application/vnd.github+json',
 				Authorization: `Bearer ${githubToken}`,
@@ -2538,7 +2525,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			tempDir = path.join(os.tmpdir(), `nono-pr-${owner}-${repo}-${pullNumber}-${Date.now()}`);
 			pr_review_temp_dir = tempDir;
 
-			const shellEscape = (arg) => `'` + String(arg).replace(/'/g, "'\\''") + `'`;
+			const shellEscape = arg => `'` + String(arg).replace(/'/g, "'\\''") + `'`;
 			const cloneUrl = `https://${githubToken}@github.com/${headRepoFullName}.git`;
 			const cloneCmd = `git clone --no-single-branch --branch ${shellEscape(compareBranch)} ${shellEscape(cloneUrl)} ${shellEscape(tempDir)}`;
 
@@ -2560,12 +2547,15 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			}
 
 			if (repoDiff && repoDiff !== '(Could not retrieve git diff automatically)') {
-				repoDiff = repoDiff.split('\n').filter(line => {
-					if (!line) return false;
-					const parts = line.split(/\s+/);
-					const filepath = parts[parts.length - 1];
-					return !isIgnoredFile(filepath);
-				}).join('\n');
+				repoDiff = repoDiff
+					.split('\n')
+					.filter(line => {
+						if (!line) return false;
+						const parts = line.split(/\s+/);
+						const filepath = parts[parts.length - 1];
+						return !isIgnoredFile(filepath);
+					})
+					.join('\n');
 			}
 
 			// Fetch the full diff (excluding lockfiles) to include in prompt if small
@@ -2620,14 +2610,17 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 			// Save metadata to support subsequent follow-up commands in the same shell
 			const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
-			fs.writeFileSync(prMetaPath, JSON.stringify({
-				tempDir,
-				baseBranch: pr_review_base_branch,
-				owner,
-				repo,
-				pullNumber
-			}), 'utf8');
-
+			fs.writeFileSync(
+				prMetaPath,
+				JSON.stringify({
+					tempDir,
+					baseBranch: pr_review_base_branch,
+					owner,
+					repo,
+					pullNumber
+				}),
+				'utf8'
+			);
 		} catch (err) {
 			cleanup();
 			console.error(`\x1b[31mError during PR review setup: ${err.message || err}\x1b[0m`);
@@ -2636,8 +2629,175 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 	}
 
+	// Helper functions for VSCode selection feature
+	function globFiles(dir, maxDepth = 4, currentDepth = 0) {
+		if (currentDepth > maxDepth) return [];
+		let results = [];
+		try {
+			const list = fs.readdirSync(dir);
+			for (const file of list) {
+				if (['.git', 'node_modules', 'dist', 'build', 'venv', '.venv', 'target', '.cache'].includes(file)) continue;
+				const fullPath = path.join(dir, file);
+				const stat = fs.statSync(fullPath);
+				if (stat.isDirectory()) {
+					results = results.concat(globFiles(fullPath, maxDepth, currentDepth + 1));
+				} else if (stat.isFile()) {
+					results.push(fullPath);
+				}
+			}
+		} catch (e) {}
+		return results;
+	}
+
+	function findFileContainingSelection(selection, rootDir) {
+		if (!selection) return null;
+		const trimmed = selection.trim();
+		if (trimmed.length < 5) return null;
+
+		const normalizedSelection = trimmed.replace(/\r\n/g, '\n');
+
+		let files = [];
+		if (rootDir) {
+			try {
+				const gitOutput = execSync('git ls-files', { cwd: rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+				files = gitOutput
+					.split('\n')
+					.filter(Boolean)
+					.map(f => path.join(rootDir, f));
+			} catch (e) {
+				files = globFiles(rootDir);
+			}
+		} else {
+			files = globFiles(process.cwd());
+		}
+
+		const fileStats = [];
+		for (const file of files) {
+			try {
+				const stats = fs.statSync(file);
+				if (stats.isFile() && stats.size <= 1024 * 1024) {
+					fileStats.push({ file, mtime: stats.mtimeMs });
+				}
+			} catch (e) {}
+		}
+
+		// Prioritize recently modified files
+		fileStats.sort((a, b) => b.mtime - a.mtime);
+
+		for (const item of fileStats) {
+			try {
+				const content = fs.readFileSync(item.file, 'utf8');
+				const normalizedContent = content.replace(/\r\n/g, '\n');
+				if (normalizedContent.includes(normalizedSelection)) {
+					return item.file;
+				}
+			} catch (e) {}
+		}
+
+		return null;
+	}
+
+	function getLanguageFromExtension(filePath) {
+		if (!filePath) return 'javascript';
+		const ext = path.extname(filePath).toLowerCase();
+		const extensionMap = {
+			'.js': 'javascript',
+			'.mjs': 'javascript',
+			'.cjs': 'javascript',
+			'.ts': 'typescript',
+			'.tsx': 'typescript',
+			'.jsx': 'javascript',
+			'.py': 'python',
+			'.rs': 'rust',
+			'.go': 'go',
+			'.java': 'java',
+			'.cpp': 'cpp',
+			'.c': 'c',
+			'.h': 'cpp',
+			'.cs': 'csharp',
+			'.sh': 'bash',
+			'.bash': 'bash',
+			'.zsh': 'bash',
+			'.rb': 'ruby',
+			'.php': 'php',
+			'.html': 'html',
+			'.css': 'css',
+			'.json': 'json',
+			'.yml': 'yaml',
+			'.yaml': 'yaml',
+			'.md': 'markdown',
+			'.toml': 'ini',
+			'.ini': 'ini',
+			'.sql': 'sql',
+			'.xml': 'xml'
+		};
+		return extensionMap[ext] || 'plain';
+	}
+
+	function getVscodeSelection() {
+		const commands = ['wl-paste -p', 'wl-paste', 'xclip -o -selection primary', 'xclip -o -selection clipboard', 'xsel -p -o', 'xsel -b -o'];
+
+		for (const cmd of commands) {
+			try {
+				const output = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+				if (output && output.trim()) {
+					return output;
+				}
+			} catch (e) {
+				// ignore and try next
+			}
+		}
+		return null;
+	}
+
 	// Capture CLI arguments
 	if (!is_initial_pr_review) {
+		let hasSelectionFlag = false;
+		let selection_context = '';
+
+		const selectionIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-s' || arg === '--selection'));
+		if (selectionIdx !== -1) {
+			hasSelectionFlag = true;
+			process.argv.splice(selectionIdx, 1);
+		}
+
+		if (hasSelectionFlag) {
+			const selectionText = getVscodeSelection();
+			if (!selectionText || !selectionText.trim()) {
+				console.error('\x1b[31mError: No selected text found in VS Code / system clipboard.\x1b[0m');
+				console.error('Please highlight some text in VS Code first.');
+				process.exit(1);
+			}
+
+			const root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
+			const detectedFile = findFileContainingSelection(selectionText, root);
+			const detectedLang = getLanguageFromExtension(detectedFile);
+
+			console.log('\n\x1b[36m✦ VSCode Selected Text Detected:\x1b[0m');
+			if (detectedFile) {
+				const relativePath = path.relative(root || process.cwd(), detectedFile);
+				console.log(`  File: \x1b[33m${relativePath}\x1b[0m`);
+			} else {
+				console.log('  File: \x1b[90m(Not detected in workspace)\x1b[0m');
+			}
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
+
+			const highlighted = cliHighlight.highlight(selectionText.trim(), {
+				language: detectedLang,
+				ignoreIllegals: true,
+				theme: custom_theme
+			});
+			console.log(highlighted);
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
+
+			selection_context = `\n\n[VS Code Selection Context]\n`;
+			if (detectedFile) {
+				const relativePath = path.relative(root || process.cwd(), detectedFile);
+				selection_context += `File: ${relativePath}\n`;
+			}
+			selection_context += `\`\`\`${detectedLang}\n${selectionText.trim()}\n\`\`\``;
+		}
+
 		if (process.argv[2] === '--full' || process.argv[2] === '-f') {
 			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
 			try {
@@ -2731,6 +2891,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 		}
+
+		if (selection_context) {
+			user_query += selection_context;
+		}
 	}
 
 	// Reset the elapsed timer to exclude prompt typing time
@@ -2741,9 +2905,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	fs.writeFileSync(details_path, '', 'utf8');
 
 	// Load or initialize session
-	const session_path = is_pr_review
-		? path.join(cache_dir, `session-pr-${process.ppid}.json`)
-		: path.join(cache_dir, `session-${process.ppid}.json`);
+	const session_path = is_pr_review ? path.join(cache_dir, `session-pr-${process.ppid}.json`) : path.join(cache_dir, `session-${process.ppid}.json`);
 	let history = [];
 	if (!is_initial_pr_review && fs.existsSync(session_path)) {
 		try {
@@ -2791,9 +2953,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						model: model_name,
 						contents: history,
 						config: {
-							systemInstruction: is_initial_pr_review
-								? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt)
-								: system_prompt,
+							systemInstruction: is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt,
 							tools: [
 								{
 									functionDeclarations: is_initial_pr_review
