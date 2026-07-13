@@ -26,7 +26,7 @@ const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, defau
 const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
 const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -1862,6 +1862,7 @@ async function main() {
   nono --selection, -s       Retrieve VSCode selection and use it as context with its file path
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
+  nono --resume              List and interactively select previous session context to resume
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
@@ -2070,6 +2071,227 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			process.exit(1);
 		}
 		process.exit(0);
+		return;
+	}
+
+	// Handle nono --resume argument
+	if (process.argv[2] === '--resume') {
+		const files = fs.readdirSync(cache_dir);
+		const sessions = [];
+		for (const file of files) {
+			if ((file.startsWith('session-') || file.startsWith('session-pr-')) && file.endsWith('.json')) {
+				const filePath = path.join(cache_dir, file);
+				try {
+					const stat = fs.statSync(filePath);
+					const content = fs.readFileSync(filePath, 'utf8');
+					const history = JSON.parse(content);
+					if (Array.isArray(history) && history.length > 0) {
+						// Extract first prompt
+						let firstPrompt = 'No prompt found';
+						for (const msg of history) {
+							if (msg && msg.role === 'user' && Array.isArray(msg.parts)) {
+								const textPart = msg.parts.find(p => p.text);
+								if (textPart && textPart.text) {
+									const text = textPart.text.trim();
+									if (!text.startsWith('[System Memory:')) {
+										let cleanText = text;
+										const bonusIdx = cleanText.indexOf('\n\n[');
+										if (bonusIdx !== -1) {
+											cleanText = cleanText.substring(0, bonusIdx).trim();
+										}
+										firstPrompt = cleanText || 'Empty prompt';
+										break;
+									}
+								}
+							}
+						}
+
+						sessions.push({
+							file,
+							path: filePath,
+							mtime: stat.mtimeMs,
+							prompt: firstPrompt,
+							history
+						});
+					}
+				} catch (e) {
+					// ignore corrupt files
+				}
+			}
+		}
+
+		if (sessions.length === 0) {
+			console.log('\x1b[31m✦ No sessions available to resume.\x1b[0m');
+			process.exit(0);
+			return;
+		}
+
+		sessions.sort((a, b) => b.mtime - a.mtime);
+
+		// Limit to top 15 most recent sessions
+		const displayedSessions = sessions.slice(0, 15);
+
+		const cols = process.stdout.columns || 80;
+		const limit = Math.max(40, cols - 30);
+
+		const formattedSessions = displayedSessions.map(s => {
+			let clean = s.prompt.replace(/\s+/g, ' ').trim();
+			if (clean.length > limit) {
+				clean = clean.substring(0, limit - 3) + '...';
+			}
+			return {
+				...s,
+				displayPrompt: clean
+			};
+		});
+
+		let selectedIndex = 0;
+		let hasRendered = false;
+
+		// Hide cursor
+		process.stdout.write('\x1b[?25l');
+
+		function render() {
+			if (hasRendered) {
+				process.stdout.write(`\x1b[${formattedSessions.length}A`);
+			}
+			hasRendered = true;
+
+			for (let i = 0; i < formattedSessions.length; i++) {
+				const session = formattedSessions[i];
+				const isSelected = i === selectedIndex;
+				process.stdout.write('\x1b[2K\r');
+				const dateStr = new Date(session.mtime).toLocaleString();
+				if (isSelected) {
+					process.stdout.write(`\x1b[32m\x1b[1m> ${session.displayPrompt}\x1b[0m \x1b[90m(${dateStr})\x1b[0m\n`);
+				} else {
+					process.stdout.write(`  ${session.displayPrompt} \x1b[90m(${dateStr})\x1b[0m\n`);
+				}
+			}
+		}
+
+		readline.emitKeypressEvents(process.stdin);
+		if (process.stdin.isTTY) {
+			process.stdin.setRawMode(true);
+		}
+
+		render();
+
+		process.stdin.on('keypress', async (str, key) => {
+			try {
+				if ((key && key.ctrl && key.name === 'c') || (key && (key.name === 'escape' || key.name === 'q'))) {
+					process.stdout.write('\x1b[?25h');
+					if (process.stdin.isTTY) {
+						process.stdin.setRawMode(false);
+					}
+					process.exit(0);
+				}
+
+				if (key && key.name === 'up') {
+					selectedIndex = (selectedIndex - 1 + formattedSessions.length) % formattedSessions.length;
+					render();
+				} else if (key && key.name === 'down') {
+					selectedIndex = (selectedIndex + 1) % formattedSessions.length;
+					render();
+				} else if (key && (key.name === 'return' || key.name === 'enter')) {
+					process.stdout.write('\x1b[?25h');
+					if (process.stdin.isTTY) {
+						process.stdin.setRawMode(false);
+					}
+					process.stdin.pause();
+
+					const session = formattedSessions[selectedIndex];
+
+					// Copy/Link the chosen session file to the current process's session file
+					const currentSessionPath = session.file.startsWith('session-pr-') ? path.join(cache_dir, `session-pr-${process.ppid}.json`) : path.join(cache_dir, `session-${process.ppid}.json`);
+
+					// Clear other mode's session/meta to avoid collision
+					if (session.file.startsWith('session-pr-')) {
+						const standardPath = path.join(cache_dir, `session-${process.ppid}.json`);
+						if (fs.existsSync(standardPath)) {
+							fs.unlinkSync(standardPath);
+						}
+						const oldPpid = session.file.replace('session-pr-', '').replace('.json', '');
+						const oldMetaPath = path.join(cache_dir, `pr-meta-${oldPpid}.json`);
+						const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+						if (fs.existsSync(oldMetaPath)) {
+							try {
+								fs.copyFileSync(oldMetaPath, currentMetaPath);
+							} catch (e) {}
+						}
+					} else {
+						const prPath = path.join(cache_dir, `session-pr-${process.ppid}.json`);
+						if (fs.existsSync(prPath)) {
+							fs.unlinkSync(prPath);
+						}
+						const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+						if (fs.existsSync(currentMetaPath)) {
+							fs.unlinkSync(currentMetaPath);
+						}
+					}
+
+					try {
+						fs.writeFileSync(currentSessionPath, JSON.stringify(session.history, null, 2), 'utf8');
+					} catch (e) {
+						console.error(`\x1b[31mError writing session file: ${e.message}\x1b[0m`);
+						process.exit(1);
+					}
+
+					// Print all retrieved messages
+					console.log(`\n\x1b[32m✔ Resumed session: ${session.prompt}\x1b[0m`);
+					console.log(`\x1b[90m--------------------------------------------------\x1b[0m`);
+
+					for (const msg of session.history) {
+						if (!msg || !Array.isArray(msg.parts)) continue;
+
+						if (msg.role === 'user') {
+							const textPart = msg.parts.find(p => p.text);
+							if (textPart && textPart.text) {
+								const text = textPart.text.trim();
+								if (text.startsWith('[System Memory:')) {
+									const cleanMemory = text
+										.replace(/^\[System Memory:\s*/, '')
+										.replace(/\]$/, '')
+										.trim();
+									console.log(`\n\x1b[33m🧠 System Memory:\x1b[0m`);
+									console.log(`\x1b[90m${cleanMemory}\x1b[0m`);
+								} else {
+									let cleanText = text;
+									const bonusIdx = cleanText.indexOf('\n\n[');
+									if (bonusIdx !== -1) {
+										cleanText = cleanText.substring(0, bonusIdx).trim();
+									}
+									console.log(`\n\x1b[36m\x1b[1m👤 User:\x1b[0m \x1b[1m${cleanText}\x1b[0m`);
+								}
+							}
+						} else if (msg.role === 'model') {
+							const textPart = msg.parts.find(p => p.text);
+							if (textPart && textPart.text) {
+								const modelText = textPart.text.trim();
+								try {
+									const highlighted = await highlightRawMarkdown(modelText);
+									console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${highlighted}`);
+								} catch (err) {
+									console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${modelText}`);
+								}
+							}
+						}
+					}
+					console.log(`\n\x1b[90m--------------------------------------------------\x1b[0m`);
+					console.log(`\x1b[32mSession context loaded! The next nono command will continue this session.\x1b[0m\n`);
+
+					process.exit(0);
+				}
+			} catch (e) {
+				process.stdout.write('\x1b[25h');
+				if (process.stdin.isTTY) {
+					process.stdin.setRawMode(false);
+				}
+				console.error(e);
+				process.exit(1);
+			}
+		});
+
 		return;
 	}
 
