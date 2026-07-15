@@ -1279,21 +1279,67 @@ function formatWithPrettier(file_path) {
 	}
 }
 
-// Helper to compute added and removed lines count between two file states (using LCS)
+// Helper to compute added and removed lines count between two file states using git diff with a pure JS fallback
 function getLineDiff(oldStr, newStr) {
 	if (!oldStr) {
 		const added = newStr ? newStr.split(/\r?\n/).length : 0;
 		return { deleted: 0, added };
 	}
+
+	try {
+		const tempDir = os.tmpdir();
+		const oldTempPath = path.join(tempDir, `nono_diff_old_${Date.now()}_${Math.random().toString(36).substring(2, 15)}.txt`);
+		const newTempPath = path.join(tempDir, `nono_diff_new_${Date.now()}_${Math.random().toString(36).substring(2, 15)}.txt`);
+
+		fs.writeFileSync(oldTempPath, oldStr, 'utf8');
+		fs.writeFileSync(newTempPath, newStr, 'utf8');
+
+		try {
+			let stdout;
+			try {
+				stdout = execSync(`git diff --no-index --numstat ${JSON.stringify(oldTempPath)} ${JSON.stringify(newTempPath)}`, {
+					encoding: 'utf8',
+					stdio: ['pipe', 'pipe', 'ignore']
+				});
+			} catch (err) {
+				stdout = err.stdout;
+			}
+
+			try {
+				fs.unlinkSync(oldTempPath);
+			} catch (e) {}
+			try {
+				fs.unlinkSync(newTempPath);
+			} catch (e) {}
+
+			if (stdout) {
+				const stdoutStr = typeof stdout === 'string' ? stdout : stdout.toString('utf8');
+				const parts = stdoutStr.trim().split(/\s+/);
+				if (parts.length >= 2) {
+					const added = parseInt(parts[0], 10);
+					const deleted = parseInt(parts[1], 10);
+					if (!isNaN(added) && !isNaN(deleted)) {
+						return { added, deleted };
+					}
+				}
+			}
+			return { added: 0, deleted: 0 };
+		} catch (gitErr) {
+			try {
+				fs.unlinkSync(oldTempPath);
+			} catch (e) {}
+			try {
+				fs.unlinkSync(newTempPath);
+			} catch (e) {}
+		}
+	} catch (e) {
+		// Fall through
+	}
+
 	const oldLines = oldStr.split(/\r?\n/);
 	const newLines = newStr ? newStr.split(/\r?\n/) : [];
 	const m = oldLines.length;
 	const n = newLines.length;
-
-	// Cap to avoid high memory/CPU on massive files
-	if (m > 1000 || n > 1000) {
-		return { deleted: m, added: n };
-	}
 
 	const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
 	for (let i = 1; i <= m; i++) {
