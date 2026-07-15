@@ -10,6 +10,7 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import cliHighlight from 'cli-highlight';
 import prettier from 'prettier';
+import * as Diff from 'diff';
 
 // Load environment variables from the directory of this script or fallback locations
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
@@ -1355,6 +1356,11 @@ function getLineDiff(oldStr, newStr) {
 	return { deleted: m - lcs, added: n - lcs };
 }
 
+// Helper to generate standard unified diff between two file states using Diff library
+function getFileDiffText(oldStr, newStr, file_path) {
+	return Diff.createPatch(file_path, oldStr || '', newStr || '', '', '', { context: 3 });
+}
+
 function writeFile({ file_path, content }) {
 	const abs_path = path.resolve(file_path);
 	const dir = path.dirname(abs_path);
@@ -1370,10 +1376,13 @@ function writeFile({ file_path, content }) {
 	const { deleted, added } = getLineDiff(old_content, final_content);
 	updateProgress(`• Writing ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
+	const diff_text = getFileDiffText(old_content, final_content, file_path);
+
 	const lint_result = runProjectDryRun(abs_path);
 	return {
 		file_path,
 		status: 'success',
+		diff: diff_text,
 		...lint_result
 	};
 }
@@ -1408,10 +1417,13 @@ function patchFile({ file_path, search_block, replace_block }) {
 	const { deleted, added } = getLineDiff(old_content, final_content);
 	updateProgress(`• Patching ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
+	const diff_text = getFileDiffText(old_content, final_content, file_path);
+
 	const lint_result = runProjectDryRun(abs_path);
 	return {
 		file_path,
 		status: 'success',
+		diff: diff_text,
 		...lint_result
 	};
 }
