@@ -1104,6 +1104,10 @@ function isHighImpactCommand(command) {
 		return true;
 	}
 
+	if (/\bgit\s+(add|commit)\b/.test(normalized)) {
+		return true;
+	}
+
 	if (normalized.includes('/etc/') || normalized.includes('/sys/') || normalized.includes('/boot/') || normalized.includes('/usr/lib/systemd')) {
 		const is_write = />|>>|tee|rm\s|mv\s|cp\s|chmod|chown|edit|mkdir|touch/g.test(command);
 		if (is_write) return true;
@@ -1731,6 +1735,7 @@ CRITICAL INSTRUCTIONS:
 - If you need up-to-date web information, use the googleSearch tool.
 - Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
+- Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
 
 Guidelines:
 - Keep your final output concise and accurate.
