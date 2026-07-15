@@ -3270,6 +3270,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				console.log('No prompt provided. Exiting.');
 				process.exit(0);
 			}
+			console.log(`\x1b[35m>\x1b[0m ${user_query.trim()}\n`);
 		} else {
 			user_query = process.argv.slice(2).join(' ');
 
