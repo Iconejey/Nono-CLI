@@ -890,6 +890,79 @@ function askUser(question, play_sound = true) {
 	});
 }
 
+// Reusable helper for key-selected choices with chevron selector
+async function chooseOption(options, headerText = null) {
+	if (headerText) {
+		console.log(headerText);
+	}
+
+	let selectedIndex = 0;
+	let hasRendered = false;
+
+	// Hide cursor
+	process.stdout.write('\x1b[?25l');
+
+	function render() {
+		if (hasRendered) {
+			process.stdout.write(`\x1b[${options.length}A`);
+		}
+		hasRendered = true;
+
+		for (let i = 0; i < options.length; i++) {
+			const option = options[i];
+			const isSelected = i === selectedIndex;
+			process.stdout.write('\x1b[2K\r');
+			if (isSelected) {
+				process.stdout.write(`\x1b[32m\x1b[1m> ${option}\x1b[0m\n`);
+			} else {
+				process.stdout.write(`  ${option}\n`);
+			}
+		}
+	}
+
+	return new Promise(resolve => {
+		readline.emitKeypressEvents(process.stdin);
+		if (process.stdin.isTTY) {
+			process.stdin.setRawMode(true);
+		}
+
+		render();
+
+		const keypressHandler = (str, key) => {
+			try {
+				if ((key && key.ctrl && key.name === 'c') || (key && (key.name === 'escape' || key.name === 'q'))) {
+					process.stdout.write('\x1b[?25h');
+					if (process.stdin.isTTY) {
+						process.stdin.setRawMode(false);
+					}
+					process.stdin.removeListener('keypress', keypressHandler);
+					process.exit(0);
+				}
+
+				if (key && key.name === 'up') {
+					selectedIndex = (selectedIndex - 1 + options.length) % options.length;
+					render();
+				} else if (key && key.name === 'down') {
+					selectedIndex = (selectedIndex + 1) % options.length;
+					render();
+				} else if (key && (key.name === 'return' || key.name === 'enter')) {
+					process.stdout.write('\x1b[?25h');
+					if (process.stdin.isTTY) {
+						process.stdin.setRawMode(false);
+					}
+					process.stdin.pause();
+					process.stdin.removeListener('keypress', keypressHandler);
+					resolve(selectedIndex);
+				}
+			} catch (err) {
+				// Ignore
+			}
+		};
+
+		process.stdin.on('keypress', keypressHandler);
+	});
+}
+
 function askUserInRoll(question) {
 	playChime('question');
 	updateProgress(question);
@@ -1885,7 +1958,7 @@ async function main() {
 
 	// Check if we are in a follow-up session for a PR review
 	const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
-	if (fs.existsSync(prMetaPath) && process.argv[2] !== '--clear' && process.argv[2] !== '--pr-review' && process.argv[2] !== 'pr-review') {
+	if (fs.existsSync(prMetaPath) && process.argv[2] !== '--clear' && process.argv[2] !== '--pr-review' && process.argv[2] !== 'pr-review' && process.argv[2] !== '--commit') {
 		try {
 			const meta = JSON.parse(fs.readFileSync(prMetaPath, 'utf8'));
 			if (meta.tempDir && fs.existsSync(meta.tempDir)) {
@@ -1926,6 +1999,7 @@ async function main() {
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
+  nono --commit              Generate commit message suggestions for staged edits and commit
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
@@ -2208,153 +2282,185 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			};
 		});
 
-		let selectedIndex = 0;
-		let hasRendered = false;
-
-		// Hide cursor
-		process.stdout.write('\x1b[?25l');
-
-		function render() {
-			if (hasRendered) {
-				process.stdout.write(`\x1b[${formattedSessions.length}A`);
-			}
-			hasRendered = true;
-
-			for (let i = 0; i < formattedSessions.length; i++) {
-				const session = formattedSessions[i];
-				const isSelected = i === selectedIndex;
-				process.stdout.write('\x1b[2K\r');
-				const dateStr = new Date(session.mtime).toLocaleString();
-				if (isSelected) {
-					process.stdout.write(`\x1b[32m\x1b[1m> ${session.displayPrompt}\x1b[0m \x1b[90m(${dateStr})\x1b[0m\n`);
-				} else {
-					process.stdout.write(`  ${session.displayPrompt} \x1b[90m(${dateStr})\x1b[0m\n`);
-				}
-			}
-		}
-
-		readline.emitKeypressEvents(process.stdin);
-		if (process.stdin.isTTY) {
-			process.stdin.setRawMode(true);
-		}
-
-		render();
-
-		process.stdin.on('keypress', async (str, key) => {
-			try {
-				if ((key && key.ctrl && key.name === 'c') || (key && (key.name === 'escape' || key.name === 'q'))) {
-					process.stdout.write('\x1b[?25h');
-					if (process.stdin.isTTY) {
-						process.stdin.setRawMode(false);
-					}
-					process.exit(0);
-				}
-
-				if (key && key.name === 'up') {
-					selectedIndex = (selectedIndex - 1 + formattedSessions.length) % formattedSessions.length;
-					render();
-				} else if (key && key.name === 'down') {
-					selectedIndex = (selectedIndex + 1) % formattedSessions.length;
-					render();
-				} else if (key && (key.name === 'return' || key.name === 'enter')) {
-					process.stdout.write('\x1b[?25h');
-					if (process.stdin.isTTY) {
-						process.stdin.setRawMode(false);
-					}
-					process.stdin.pause();
-
-					const session = formattedSessions[selectedIndex];
-
-					// Copy/Link the chosen session file to the current process's session file
-					const currentSessionPath = session.file.startsWith('session-pr-') ? path.join(cache_dir, `session-pr-${process.ppid}.json`) : path.join(cache_dir, `session-${process.ppid}.json`);
-
-					// Clear other mode's session/meta to avoid collision
-					if (session.file.startsWith('session-pr-')) {
-						const standardPath = path.join(cache_dir, `session-${process.ppid}.json`);
-						if (fs.existsSync(standardPath)) {
-							fs.unlinkSync(standardPath);
-						}
-						const oldPpid = session.file.replace('session-pr-', '').replace('.json', '');
-						const oldMetaPath = path.join(cache_dir, `pr-meta-${oldPpid}.json`);
-						const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
-						if (fs.existsSync(oldMetaPath)) {
-							try {
-								fs.copyFileSync(oldMetaPath, currentMetaPath);
-							} catch (e) {}
-						}
-					} else {
-						const prPath = path.join(cache_dir, `session-pr-${process.ppid}.json`);
-						if (fs.existsSync(prPath)) {
-							fs.unlinkSync(prPath);
-						}
-						const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
-						if (fs.existsSync(currentMetaPath)) {
-							fs.unlinkSync(currentMetaPath);
-						}
-					}
-
-					try {
-						fs.writeFileSync(currentSessionPath, JSON.stringify(session.history, null, 2), 'utf8');
-					} catch (e) {
-						console.error(`\x1b[31mError writing session file: ${e.message}\x1b[0m`);
-						process.exit(1);
-					}
-
-					// Print all retrieved messages
-					console.log(`\n\x1b[32m✔ Resumed session: ${session.prompt}\x1b[0m`);
-					console.log(`\x1b[90m--------------------------------------------------\x1b[0m`);
-
-					for (const msg of session.history) {
-						if (!msg || !Array.isArray(msg.parts)) continue;
-
-						if (msg.role === 'user') {
-							const textPart = msg.parts.find(p => p.text);
-							if (textPart && textPart.text) {
-								const text = textPart.text.trim();
-								if (text.startsWith('[System Memory:')) {
-									const cleanMemory = text
-										.replace(/^\[System Memory:\s*/, '')
-										.replace(/\]$/, '')
-										.trim();
-									console.log(`\n\x1b[33m🧠 System Memory:\x1b[0m`);
-									console.log(`\x1b[90m${cleanMemory}\x1b[0m`);
-								} else {
-									let cleanText = text;
-									const bonusIdx = cleanText.indexOf('\n\n[');
-									if (bonusIdx !== -1) {
-										cleanText = cleanText.substring(0, bonusIdx).trim();
-									}
-									console.log(`\n\x1b[36m\x1b[1m👤 User:\x1b[0m \x1b[1m${cleanText}\x1b[0m`);
-								}
-							}
-						} else if (msg.role === 'model') {
-							const textPart = msg.parts.find(p => p.text);
-							if (textPart && textPart.text) {
-								const modelText = textPart.text.trim();
-								try {
-									const highlighted = await highlightRawMarkdown(modelText);
-									console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${highlighted}`);
-								} catch (err) {
-									console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${modelText}`);
-								}
-							}
-						}
-					}
-					console.log(`\n\x1b[90m--------------------------------------------------\x1b[0m`);
-					console.log(`\x1b[32mSession context loaded! The next nono command will continue this session.\x1b[0m\n`);
-
-					process.exit(0);
-				}
-			} catch (e) {
-				process.stdout.write('\x1b[25h');
-				if (process.stdin.isTTY) {
-					process.stdin.setRawMode(false);
-				}
-				console.error(e);
-				process.exit(1);
-			}
+		const options = formattedSessions.map(s => {
+			const dateStr = new Date(s.mtime).toLocaleString();
+			return `${s.displayPrompt} \x1b[90m(${dateStr})\x1b[0m`;
 		});
 
+		let selectedIndex;
+		try {
+			selectedIndex = await chooseOption(options, '\x1b[35mSelect a session to resume:\x1b[0m');
+		} catch (e) {
+			console.error(e);
+			process.exit(1);
+		}
+
+		const session = formattedSessions[selectedIndex];
+
+		// Copy/Link the chosen session file to the current process's session file
+		const currentSessionPath = session.file.startsWith('session-pr-') ? path.join(cache_dir, `session-pr-${process.ppid}.json`) : path.join(cache_dir, `session-${process.ppid}.json`);
+
+		// Clear other mode's session/meta to avoid collision
+		if (session.file.startsWith('session-pr-')) {
+			const standardPath = path.join(cache_dir, `session-${process.ppid}.json`);
+			if (fs.existsSync(standardPath)) {
+				fs.unlinkSync(standardPath);
+			}
+			const oldPpid = session.file.replace('session-pr-', '').replace('.json', '');
+			const oldMetaPath = path.join(cache_dir, `pr-meta-${oldPpid}.json`);
+			const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+			if (fs.existsSync(oldMetaPath)) {
+				try {
+					fs.copyFileSync(oldMetaPath, currentMetaPath);
+				} catch (e) {}
+			}
+		} else {
+			const prPath = path.join(cache_dir, `session-pr-${process.ppid}.json`);
+			if (fs.existsSync(prPath)) {
+				fs.unlinkSync(prPath);
+			}
+			const currentMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
+			if (fs.existsSync(currentMetaPath)) {
+				fs.unlinkSync(currentMetaPath);
+			}
+		}
+
+		try {
+			fs.writeFileSync(currentSessionPath, JSON.stringify(session.history, null, 2), 'utf8');
+		} catch (e) {
+			console.error(`\x1b[31mError writing session file: ${e.message}\x1b[0m`);
+			process.exit(1);
+		}
+
+		// Print all retrieved messages
+		console.log(`\n\x1b[32m✔ Resumed session: ${session.prompt}\x1b[0m`);
+		console.log(`\x1b[90m--------------------------------------------------\x1b[0m`);
+
+		for (const msg of session.history) {
+			if (!msg || !Array.isArray(msg.parts)) continue;
+
+			if (msg.role === 'user') {
+				const textPart = msg.parts.find(p => p.text);
+				if (textPart && textPart.text) {
+					const text = textPart.text.trim();
+					if (text.startsWith('[System Memory:')) {
+						const cleanMemory = text
+							.replace(/^\[System Memory:\s*/, '')
+							.replace(/\]$/, '')
+							.trim();
+						console.log(`\n\x1b[33m🧠 System Memory:\x1b[0m`);
+						console.log(`\x1b[90m${cleanMemory}\x1b[0m`);
+					} else {
+						let cleanText = text;
+						const bonusIdx = cleanText.indexOf('\n\n[');
+						if (bonusIdx !== -1) {
+							cleanText = cleanText.substring(0, bonusIdx).trim();
+						}
+						console.log(`\n\x1b[36m\x1b[1m👤 User:\x1b[0m \x1b[1m${cleanText}\x1b[0m`);
+					}
+				}
+			} else if (msg.role === 'model') {
+				const textPart = msg.parts.find(p => p.text);
+				if (textPart && textPart.text) {
+					const modelText = textPart.text.trim();
+					try {
+						const highlighted = await highlightRawMarkdown(modelText);
+						console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${highlighted}`);
+					} catch (err) {
+						console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${modelText}`);
+					}
+				}
+			}
+		}
+		console.log(`\n\x1b[90m--------------------------------------------------\x1b[0m`);
+		console.log(`\x1b[32mSession context loaded! The next nono command will continue this session.\x1b[0m\n`);
+
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --commit command
+	if (process.argv[2] === '--commit') {
+		// 1. Verify inside git repo
+		try {
+			execSync('git rev-parse --is-inside-work-tree', { stdio: 'ignore' });
+		} catch (e) {
+			console.log('\x1b[31m✦ Not a git repository (or any of the parent directories)\x1b[0m');
+			process.exit(1);
+		}
+
+		// 2. Fetch cached/staged diff
+		const diff = execSync('git diff --cached', { encoding: 'utf8' }).trim();
+		if (!diff) {
+			console.log('\x1b[31m✦ No staged changes found. Use "git add" to stage files first.\x1b[0m');
+			process.exit(1);
+		}
+
+		console.log('\x1b[35m✦ Generating git commit message suggestions... ✦\x1b[0m\n');
+
+		// 3. Call Gemini to generate suggestions
+		try {
+			const prompt = `You are an expert assistant generating professional git commit messages based on staged changes (the git diff).
+Here is the staged git diff:
+<git_diff>
+${diff}
+</git_diff>
+
+Based on these changes, generate exactly 3 distinct, professional, and descriptive git commit message suggestions.
+Follow the Conventional Commits style (e.g., feat(scope): message, fix: message, chore: message, docs: message, style: message, refactor: message) where appropriate.
+Keep each suggestion concise (ideally under 72 characters) and on a single line.
+
+Return ONLY the 3 suggestions, each on its own line, with absolutely no numbering, bullet points, headers, explanations, markdown formatting (no code blocks), or other text.
+Example response:
+feat: implement payment gateway integration
+refactor: streamline user authentication middleware
+fix: resolve null pointer exception in checkout flow`;
+
+			const response = await ai.models.generateContent({
+				model: model_name,
+				contents: [{ role: 'user', parts: [{ text: prompt }] }]
+			});
+
+			const text = response.text || '';
+			const suggestions = text
+				.split('\n')
+				.map(line => line.replace(/^[\s-*•\d.]+\s*/, '').trim())
+				.filter(line => line.length > 0)
+				.slice(0, 3);
+
+			if (suggestions.length === 0) {
+				console.log('\x1b[31m✦ Could not generate suggestions. Please try again or write your own message.\x1b[0m');
+				process.exit(1);
+			}
+
+			const options = [...suggestions, 'Write my own commit message...'];
+
+			const selectedIdx = await chooseOption(options, '\x1b[35mSelect a git commit message suggestion:\x1b[0m');
+			let commitMessage = '';
+
+			if (selectedIdx === suggestions.length) {
+				// User wants to write their own message
+				process.stdout.write('\n');
+				commitMessage = await askUser('Enter your custom commit message: ', false);
+				commitMessage = commitMessage.trim();
+				if (!commitMessage) {
+					console.log('\x1b[31m✦ Commit message cannot be empty. Cancelled.\x1b[0m');
+					process.exit(1);
+				}
+			} else {
+				commitMessage = options[selectedIdx];
+			}
+
+			console.log(`\n\x1b[36m✦ Committing changes with message: "${commitMessage}"...\x1b[0m`);
+			const commitOutput = execSync(`git commit -m ${JSON.stringify(commitMessage)}`, { encoding: 'utf8' });
+			console.log(commitOutput);
+			console.log('\x1b[32m✔ Commit successful!\x1b[0m');
+		} catch (err) {
+			console.error(`\x1b[31mError during commit generation or execution: ${err.stdout || err.message}\x1b[0m`);
+			process.exit(1);
+		}
+
+		process.exit(0);
 		return;
 	}
 
