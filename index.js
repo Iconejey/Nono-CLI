@@ -2400,14 +2400,27 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 
 		// 3. Call Gemini to generate suggestions
 		try {
+			let previousCommits = '';
+			try {
+				previousCommits = execSync('git log -n 10 --format=%s', { encoding: 'utf8' }).trim();
+			} catch (e) {
+				// Ignore if no commits yet
+			}
+
+			let previousCommitsPrompt = '';
+			if (previousCommits) {
+				previousCommitsPrompt = `\nHere are some of the previous commit messages in this repository for context on the project's commit style:\n<previous_commits>\n${previousCommits}\n</previous_commits>\n\nPlease closely follow the same format, style, and phrasing as the previous commits above (e.g. matching casing, prefixes, style patterns, imperative mood, etc.).`;
+			}
+
 			const prompt = `You are an expert assistant generating professional git commit messages based on staged changes (the git diff).
 Here is the staged git diff:
 <git_diff>
 ${diff}
 </git_diff>
+${previousCommitsPrompt}
 
 Based on these changes, generate exactly 3 distinct, professional, and descriptive git commit message suggestions.
-Follow the Conventional Commits style (e.g., feat(scope): message, fix: message, chore: message, docs: message, style: message, refactor: message) where appropriate.
+Follow the Conventional Commits style (e.g., feat(scope): message, fix: message, chore: message, docs: message, style: message, refactor: message) where appropriate (unless the previous commits suggest a different style, in which case prioritize matching the previous commit style).
 Keep each suggestion concise (ideally under 72 characters) and on a single line.
 
 Return ONLY the 3 suggestions, each on its own line, with absolutely no numbering, bullet points, headers, explanations, markdown formatting (no code blocks), or other text.
