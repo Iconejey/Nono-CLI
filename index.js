@@ -454,6 +454,11 @@ async function formatCodeWithPrettier(code, lang) {
 // Helper to format markdown text beautifully for the terminal output
 async function formatMarkdownForTerminal(md) {
 	if (!md) return '';
+	try {
+		md = await formatCodeWithPrettier(md, 'markdown');
+	} catch (e) {
+		// fallback
+	}
 	const lines = md.split('\n');
 	const formatted_lines = [];
 	let in_code_block = false;
