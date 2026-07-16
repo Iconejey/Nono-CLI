@@ -3212,11 +3212,20 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
 
-			const highlighted = cliHighlight.highlight(selectionText.trim(), {
-				language: detectedLang,
-				ignoreIllegals: true,
-				theme: custom_theme
-			});
+			let highlighted;
+			if (detectedLang && cliHighlight.supportsLanguage(detectedLang)) {
+				try {
+					highlighted = cliHighlight.highlight(selectionText.trim(), {
+						language: detectedLang,
+						ignoreIllegals: true,
+						theme: custom_theme
+					});
+				} catch (e) {
+					highlighted = selectionText.trim();
+				}
+			} else {
+				highlighted = selectionText.trim();
+			}
 			console.log(highlighted);
 			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
 
