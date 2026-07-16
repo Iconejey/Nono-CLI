@@ -26,6 +26,8 @@ const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOL
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
 const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
+const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
+const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
 if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
@@ -356,8 +358,9 @@ function getCleanThoughtLine(text) {
 	if (lines.length === 0) return '';
 	let first_line = lines[0];
 	first_line = first_line.replace(/[*_`#]/g, '');
-	if (first_line.length > 120) {
-		return first_line.slice(0, 117) + '...';
+	if (first_line.length > thought_limit) {
+		const slice_len = Math.max(0, thought_limit - 3);
+		return first_line.slice(0, slice_len) + '...';
 	}
 	return first_line;
 }
