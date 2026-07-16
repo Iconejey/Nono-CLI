@@ -82,9 +82,18 @@ nono --clear
 nono --get-pricing
 
 # Open a temp file in your text editor to write a prompt and execute it on save and exit
-nono --full
+nono --write
 # Or using the shorthand flag
-nono -f
+nono -w
+
+# Include whole or parts of a file (optional line range) as context
+nono --file path/to/file.js:10-20 "Please explain this range"
+# Or using the shorthand flag
+nono -f path/to/file.js:10-20 "Please explain this range"
+
+# Include VS Code selection or clipboard content
+nono --vscode "What does this code do?"
+nono --clipboard "Review this copied text"
 
 # Show CLI options
 nono --help
@@ -98,19 +107,20 @@ Nono can be customized using environment variables or configuration files.
 
 Place these in your `.env` files (checked at `./.env`, the script directory's `.env`, or `~/.config/nono/.env`):
 
-| Variable                     | Description                                                                   | Default            |
-| :--------------------------- | :---------------------------------------------------------------------------- | :----------------- |
-| `GEMINI_API_KEY`             | **Required**. Your Gemini API Key.                                            | None               |
-| `GEMINI_MODEL`               | The Gemini model to use for the agent.                                        | `gemini-3.5-flash` |
-| `NONO_VOLUME`                | Volume level for audio chime notifications (between `0` and `1`).             | `0.6`              |
-| `NONO_THEME`                 | Custom terminal syntax highlighting theme (JSON string or path to JSON file). | Hardcoded default  |
+| Variable                      | Description                                                                   | Default            |
+| :---------------------------- | :---------------------------------------------------------------------------- | :----------------- |
+| `GEMINI_API_KEY`              | **Required**. Your Gemini API Key.                                            | None               |
+| `GEMINI_MODEL`                | The Gemini model to use for the agent.                                        | `gemini-3.5-flash` |
+| `NONO_VOLUME`                 | Volume level for audio chime notifications (between `0` and `1`).             | `0.6`              |
+| `NONO_THEME`                  | Custom terminal syntax highlighting theme (JSON string or path to JSON file). | Hardcoded default  |
 | `NONO_SUMMARIZE_TOKEN_LIMIT`  | Token threshold before initiating background conversation summarization.      | `20000`            |
 | `NONO_SUMMARIZE_OUTPUT_LIMIT` | Character threshold before intercepting and summarizing large tool outputs.   | `10000`            |
 | `NONO_CURRENCY`               | Currency symbol or code displayed in consumption auditing tables.             | `€`                |
-| `NONO_COUNTRY`               | Country name context used for online model pricing lookup.                    | `France`           |
-| `NONO_PRICE_INPUT_PER_M`     | Custom input token price per million (for cost calculations).                 | `1.38`             |
-| `NONO_PRICE_OUTPUT_PER_M`    | Custom output token price per million (for cost calculations).                | `8.28`             |
-| `NONO_PRICE_CACHE_PER_M`     | Custom cache read token price per million (for cost calculations).            | `0.138`            |
+| `NONO_COUNTRY`                | Country name context used for online model pricing lookup.                    | `France`           |
+| `NONO_PRICE_INPUT_PER_M`      | Custom input token price per million (for cost calculations).                 | `1.38`             |
+| `NONO_PRICE_OUTPUT_PER_M`     | Custom output token price per million (for cost calculations).                | `8.28`             |
+| `NONO_PRICE_CACHE_PER_M`      | Custom cache read token price per million (for cost calculations).            | `0.138`            |
+| `NONO_EDITOR`                 | Force a terminal editor for the write prompt command (e.g. `vim`, `nano`).    | None               |
 
 ### Custom Styling & Themes
 

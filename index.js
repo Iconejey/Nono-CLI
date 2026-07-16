@@ -2020,8 +2020,10 @@ async function main() {
 \x1b[1mUsage:\x1b[0m
   nono                       Start Nono in interactive mode
   nono [prompt]              Run a prompt directly from the command line
-  nono --full, -f            Open a temp file in vim to write a prompt
-  nono --selection, -s       Retrieve VSCode selection and use it as context with its file path
+  nono --write, -w           Open a temp file in your text editor to write a prompt
+  nono --vscode, -vs         Retrieve VSCode selection and use it as context with its file path
+  nono --file, -f <spec>     Include whole/parts of a text file (spec: path[:line] or path[:start_line-end_line])
+  nono --clipboard, -c       Include the copied text in clipboard
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
@@ -3164,6 +3166,73 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		return extensionMap[ext] || 'plain';
 	}
 
+	function isLikelyCode(text) {
+		if (!text) return false;
+		const trimmed = text.trim();
+		if (trimmed.length < 5) return false;
+
+		// If contains markdown code blocks, it's definitely code
+		if (trimmed.includes('```')) return true;
+
+		// Count indicators
+		let score = 0;
+
+		const lines = trimmed.split('\n');
+		let endsWithSemicolon = 0;
+		let emptyOrComment = 0;
+		for (const line of lines) {
+			const l = line.trim();
+			if (!l) {
+				emptyOrComment++;
+				continue;
+			}
+			if (l.startsWith('//') || l.startsWith('#') || l.startsWith('/*')) {
+				emptyOrComment++;
+				continue;
+			}
+			if (l.endsWith(';')) {
+				endsWithSemicolon++;
+			}
+		}
+		const activeLines = lines.length - emptyOrComment;
+		if (activeLines > 0 && endsWithSemicolon / activeLines > 0.3) {
+			score += 3;
+		}
+
+		if (/[\w_]\s*=\s*/.test(trimmed)) score += 1;
+		if (/\b(const|let|var|function|return|import|export|class|await|async)\b/.test(trimmed)) score += 2;
+		if (/\b(def\s+\w+|elif|import\s+\w+|print\s*\(|if\s+__name__)\b/.test(trimmed)) score += 2;
+		if (/\b(public\s+class|private\s+|protected\s+|#include|std::|using\s+namespace)\b/.test(trimmed)) score += 2;
+		if (/\b(fn\s+\w+|let\s+mut|pub\s+fn|use\s+std::)\b/.test(trimmed)) score += 2;
+		if (/\b(select\s+.*\s+from|insert\s+into|update\s+.*set)\b/i.test(trimmed)) score += 2;
+		if (/<[a-z/][^>]*>/i.test(trimmed)) score += 2;
+		if (/[\w_]\([^)]*\)\s*\{/.test(trimmed)) score += 2;
+		if (/(===|!==|&&|\|\||=>)/.test(trimmed)) score += 2;
+		if (/[{}]{2,}/.test(trimmed)) score += 1;
+
+		const openBraces = (trimmed.match(/\{/g) || []).length;
+		const closeBraces = (trimmed.match(/\}/g) || []).length;
+		if (openBraces > 0 && openBraces === closeBraces) {
+			score += 2;
+		}
+
+		const openParens = (trimmed.match(/\(/g) || []).length;
+		const closeParens = (trimmed.match(/\)/g) || []).length;
+		if (openParens > 0 && openParens === closeParens) {
+			score += 1;
+		}
+
+		if (/^(hi|hello|please|hey|dear|could you|i want to|can you|explain|what is)\b/i.test(trimmed)) {
+			score -= 3;
+		}
+		const wordCount = trimmed.split(/\s+/).length;
+		if (wordCount > 15 && !trimmed.includes('{') && !trimmed.includes(';') && !trimmed.includes('def ')) {
+			score -= 2;
+		}
+
+		return score >= 3;
+	}
+
 	function getVscodeSelection() {
 		const commands = ['wl-paste -p', 'wl-paste', 'xclip -o -selection primary', 'xclip -o -selection clipboard', 'xsel -p -o', 'xsel -b -o'];
 
@@ -3180,18 +3249,37 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		return null;
 	}
 
+	function getClipboardText() {
+		const commands = ['wl-paste', 'xclip -o -selection clipboard', 'xsel -b -o'];
+
+		for (const cmd of commands) {
+			try {
+				const output = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+				if (output && output.trim()) {
+					return output;
+				}
+			} catch (e) {
+				// ignore and try next
+			}
+		}
+		return null;
+	}
+
 	// Capture CLI arguments
 	if (!is_initial_pr_review) {
-		let hasSelectionFlag = false;
-		let selection_context = '';
+		let vscode_context = '';
+		let file_context = '';
+		let clipboard_context = '';
 
-		const selectionIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-s' || arg === '--selection'));
-		if (selectionIdx !== -1) {
-			hasSelectionFlag = true;
-			process.argv.splice(selectionIdx, 1);
+		// 1. Parse --vscode / -vs
+		let hasVscodeFlag = false;
+		const vscodeIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-vs' || arg === '--vscode'));
+		if (vscodeIdx !== -1) {
+			hasVscodeFlag = true;
+			process.argv.splice(vscodeIdx, 1);
 		}
 
-		if (hasSelectionFlag) {
+		if (hasVscodeFlag) {
 			const selectionText = getVscodeSelection();
 			if (!selectionText || !selectionText.trim()) {
 				console.error('\x1b[31mError: No selected text found in VS Code / system clipboard.\x1b[0m');
@@ -3229,25 +3317,169 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			console.log(highlighted);
 			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
 
-			selection_context = `\n\n[VS Code Selection Context]\n`;
+			vscode_context = `\n\n[VS Code Selection Context]\n`;
 			if (detectedFile) {
 				const relativePath = path.relative(root || process.cwd(), detectedFile);
-				selection_context += `File: ${relativePath}\n`;
+				vscode_context += `File: ${relativePath}\n`;
 			}
-			selection_context += `\`\`\`${detectedLang}\n${selectionText.trim()}\n\`\`\``;
+			vscode_context += `\`\`\`${detectedLang}\n${selectionText.trim()}\n\`\`\``;
 		}
 
-		if (process.argv[2] === '--full' || process.argv[2] === '-f') {
+		// 2. Parse --file / -f [path][:line][:start_line-end_line]
+		let hasFileFlag = false;
+		const fileIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-f' || arg === '--file'));
+		if (fileIdx !== -1) {
+			hasFileFlag = true;
+			const fileArg = process.argv[fileIdx + 1];
+			if (!fileArg || fileArg.startsWith('-')) {
+				console.error('\x1b[31mError: Missing file path for --file (-f) command.\x1b[0m');
+				console.error('Usage: nono --file <path>[:line] or --file <path>[:start_line-end_line]');
+				process.exit(1);
+			}
+			process.argv.splice(fileIdx, 2);
+
+			let filePath = fileArg;
+			let startLine = null;
+			let endLine = null;
+
+			const rangeMatch = fileArg.match(/:(\d+)-(\d+)$/);
+			const singleMatch = fileArg.match(/:(\d+)$/);
+
+			if (rangeMatch) {
+				startLine = parseInt(rangeMatch[1], 10);
+				endLine = parseInt(rangeMatch[2], 10);
+				filePath = fileArg.substring(0, rangeMatch.index);
+			} else if (singleMatch) {
+				startLine = parseInt(singleMatch[1], 10);
+				endLine = startLine;
+				filePath = fileArg.substring(0, singleMatch.index);
+			}
+
+			let resolvedPath = path.resolve(process.cwd(), filePath);
+			if (!fs.existsSync(resolvedPath)) {
+				const root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
+				if (root) {
+					resolvedPath = path.resolve(root, filePath);
+				}
+			}
+
+			if (!fs.existsSync(resolvedPath)) {
+				console.error(`\x1b[31mError: File not found: ${filePath}\x1b[0m`);
+				process.exit(1);
+			}
+
+			let fileContent = '';
+			try {
+				fileContent = fs.readFileSync(resolvedPath, 'utf8');
+			} catch (err) {
+				console.error(`\x1b[31mError reading file ${filePath}: ${err.message}\x1b[0m`);
+				process.exit(1);
+			}
+
+			const lines = fileContent.split(/\r?\n/);
+			let selectedLines = [];
+			if (startLine !== null && endLine !== null) {
+				const totalLines = lines.length;
+				const sLine = Math.max(1, Math.min(startLine, totalLines));
+				const eLine = Math.max(1, Math.min(endLine, totalLines));
+				selectedLines = lines.slice(sLine - 1, eLine);
+			} else {
+				selectedLines = lines;
+			}
+			const extractedText = selectedLines.join('\n');
+			const detectedLang = getLanguageFromExtension(filePath);
+
+			console.log(`\n\x1b[36m✦ File Context Detected:\x1b[0m`);
+			let lineRangeInfo = '';
+			if (startLine !== null && endLine !== null) {
+				if (startLine === endLine) {
+					lineRangeInfo = ` (Line ${startLine})`;
+				} else {
+					lineRangeInfo = ` (Lines ${startLine}-${endLine})`;
+				}
+			}
+			console.log(`  File: \x1b[33m${filePath}\x1b[0m${lineRangeInfo}`);
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
+
+			let highlighted;
+			let isLangSupported = detectedLang && detectedLang !== 'plain' && cliHighlight.supportsLanguage(detectedLang);
+			if (isLangSupported) {
+				try {
+					highlighted = cliHighlight.highlight(extractedText, {
+						language: detectedLang,
+						ignoreIllegals: true,
+						theme: custom_theme
+					});
+				} catch (e) {
+					highlighted = extractedText;
+				}
+			} else if (isLikelyCode(extractedText)) {
+				try {
+					highlighted = cliHighlight.highlight(extractedText, {
+						ignoreIllegals: true,
+						theme: custom_theme
+					});
+				} catch (e) {
+					highlighted = extractedText;
+				}
+			} else {
+				highlighted = extractedText;
+			}
+			console.log(highlighted);
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
+
+			file_context = `\n\n[File Context]\nFile: ${filePath}${lineRangeInfo}\n\`\`\`${detectedLang}\n${extractedText}\n\`\`\``;
+		}
+
+		// 3. Parse --clipboard / -c
+		let hasClipboardFlag = false;
+		const clipboardIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-c' || arg === '--clipboard'));
+		if (clipboardIdx !== -1) {
+			hasClipboardFlag = true;
+			process.argv.splice(clipboardIdx, 1);
+		}
+
+		if (hasClipboardFlag) {
+			const clipboardText = getClipboardText();
+			if (!clipboardText || !clipboardText.trim()) {
+				console.error('\x1b[31mError: No text found in clipboard.\x1b[0m');
+				process.exit(1);
+			}
+
+			console.log('\n\x1b[36m✦ Clipboard Text Detected:\x1b[0m');
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
+			let highlighted = clipboardText.trim();
+			if (isLikelyCode(highlighted)) {
+				try {
+					highlighted = cliHighlight.highlight(highlighted, {
+						ignoreIllegals: true,
+						theme: custom_theme
+					});
+				} catch (e) {
+					highlighted = clipboardText.trim();
+				}
+			}
+			console.log(highlighted);
+			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
+
+			clipboard_context = `\n\n[Clipboard Context]\n\`\`\`\n${clipboardText.trim()}\n\`\`\``;
+		}
+
+		if (process.argv[2] === '--write' || process.argv[2] === '-w') {
 			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
 			try {
 				fs.writeFileSync(tempPath, '', 'utf8');
 				await new Promise((resolve, reject) => {
 					const editors = [];
-					if (process.env.VISUAL) editors.push(process.env.VISUAL);
-					if (process.env.EDITOR) editors.push(process.env.EDITOR);
-					for (const fallback of ['vim', 'vi', 'nano']) {
-						if (!editors.includes(fallback)) {
-							editors.push(fallback);
+					if (process.env.NONO_EDITOR) {
+						editors.push(process.env.NONO_EDITOR);
+					} else {
+						if (process.env.VISUAL) editors.push(process.env.VISUAL);
+						if (process.env.EDITOR) editors.push(process.env.EDITOR);
+						for (const fallback of ['vim', 'vi', 'nano']) {
+							if (!editors.includes(fallback)) {
+								editors.push(fallback);
+							}
 						}
 					}
 
@@ -3318,7 +3550,18 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				console.log('No prompt provided. Exiting.');
 				process.exit(0);
 			}
-			console.log(`\x1b[35m>\x1b[0m ${user_query.trim()}\n`);
+			let printedPrompt = user_query.trim();
+			if (isLikelyCode(printedPrompt)) {
+				try {
+					printedPrompt = cliHighlight.highlight(printedPrompt, {
+						ignoreIllegals: true,
+						theme: custom_theme
+					});
+				} catch (e) {
+					printedPrompt = user_query.trim();
+				}
+			}
+			console.log(`\x1b[35m>\x1b[0m ${printedPrompt}\n`);
 		} else {
 			user_query = process.argv.slice(2).join(' ');
 
@@ -3332,8 +3575,13 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 		}
 
-		if (selection_context) {
-			user_query += selection_context;
+		let combined_context = '';
+		if (vscode_context) combined_context += vscode_context;
+		if (file_context) combined_context += file_context;
+		if (clipboard_context) combined_context += clipboard_context;
+
+		if (combined_context) {
+			user_query += combined_context;
 		}
 	}
 
