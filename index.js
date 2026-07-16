@@ -406,6 +406,12 @@ function formatToolCallProgress(name, args) {
 		case 'view_file_git_diff': {
 			return `Viewing git diff for ${basename}`;
 		}
+		case 'discard_specific_output': {
+			return `Discarding output for "${args.target}"`;
+		}
+		case 'discard_last_steps': {
+			return `Discarding the last ${args.steps_count} steps`;
+		}
 		default: {
 			const arg_vals = Object.values(args)
 				.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -1661,6 +1667,112 @@ function viewFileGitDiff({ base_branch, file_path }) {
 	});
 }
 
+function findCorrespondingCall(history, userMsgIndex, responsePart, partIndex) {
+	const modelMsg = history[userMsgIndex - 1];
+	if (!modelMsg || modelMsg.role !== 'model' || !Array.isArray(modelMsg.parts)) {
+		return null;
+	}
+
+	// 1. Try matching by ID if present
+	if (responsePart.functionResponse.id) {
+		const found = modelMsg.parts.find(p => p.functionCall && p.functionCall.id === responsePart.functionResponse.id);
+		if (found) return found.functionCall;
+	}
+
+	// 2. Try matching by same index
+	const modelPart = modelMsg.parts[partIndex];
+	if (modelPart && modelPart.functionCall && modelPart.functionCall.name === responsePart.functionResponse.name) {
+		return modelPart.functionCall;
+	}
+
+	// 3. Fallback: match by name
+	const foundByName = modelMsg.parts.find(p => p.functionCall && p.functionCall.name === responsePart.functionResponse.name);
+	if (foundByName) return foundByName.functionCall;
+
+	return null;
+}
+
+function matchesTarget(functionCall, target) {
+	if (!functionCall || !functionCall.args) return false;
+	const args = functionCall.args;
+	for (const key of Object.keys(args)) {
+		if (typeof args[key] === 'string' && args[key] === target) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function discardSpecificOutput({ target }, history) {
+	if (!Array.isArray(history)) {
+		return { status: 'error', error: 'History is not available.' };
+	}
+	if (typeof target !== 'string' || !target) {
+		return { status: 'error', error: 'Invalid target provided.' };
+	}
+	let count = 0;
+	for (let i = 0; i < history.length; i++) {
+		const msg = history[i];
+		if (msg.role === 'user' && Array.isArray(msg.parts)) {
+			for (let p = 0; p < msg.parts.length; p++) {
+				const part = msg.parts[p];
+				if (part && part.functionResponse) {
+					const call = findCorrespondingCall(history, i, part, p);
+					if (call && matchesTarget(call, target)) {
+						part.functionResponse.response = {
+							status: 'success',
+							erased: true,
+							message: 'This output has been erased to optimize context window space.'
+						};
+						count++;
+					}
+				}
+			}
+		}
+	}
+	return {
+		status: 'success',
+		message: `Successfully erased ${count} tool output(s) matching "${target}".`
+	};
+}
+
+function discardLastSteps({ steps_count }, history) {
+	if (!Array.isArray(history)) {
+		return { status: 'error', error: 'History is not available.' };
+	}
+	const count = parseInt(steps_count, 10);
+	if (isNaN(count) || count <= 0) {
+		return { status: 'error', error: 'Invalid steps_count provided.' };
+	}
+	let erased_count = 0;
+	for (let i = history.length - 1; i >= 0; i--) {
+		const msg = history[i];
+		if (msg.role === 'user' && Array.isArray(msg.parts)) {
+			for (let p = msg.parts.length - 1; p >= 0; p--) {
+				const part = msg.parts[p];
+				if (part && part.functionResponse) {
+					part.functionResponse.response = {
+						status: 'success',
+						erased: true,
+						message: 'This output has been erased to optimize context window space.'
+					};
+					erased_count++;
+					if (erased_count >= count) {
+						break;
+					}
+				}
+			}
+		}
+		if (erased_count >= count) {
+			break;
+		}
+	}
+	return {
+		status: 'success',
+		message: `Successfully erased the last ${erased_count} tool output(s).`
+	};
+}
+
 // Map tool name to implementation function
 const tools_mapping = {
 	list_directory_structure: listDirectoryStructure,
@@ -1671,7 +1783,9 @@ const tools_mapping = {
 	execute_system_command: executeSystemCommand,
 	propose_terminal_input: proposeTerminalInput,
 	read_terminal_buffer: readTerminalBuffer,
-	view_file_git_diff: viewFileGitDiff
+	view_file_git_diff: viewFileGitDiff,
+	discard_specific_output: discardSpecificOutput,
+	discard_last_steps: discardLastSteps
 };
 
 // Helper to get OS description dynamically
@@ -1708,6 +1822,35 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 
 const tools_declarations = [
+	{
+		name: 'discard_specific_output',
+		description:
+			"Replaces the output of a specific previous tool call (such as a read file or an executed command) with an 'erased' placeholder to optimize context window space. Use this when you realize a specific file or command output is useless.",
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				target: {
+					type: 'STRING',
+					description: 'The exact file path or command string whose output should be cleared from memory.'
+				}
+			},
+			required: ['target']
+		}
+	},
+	{
+		name: 'discard_last_steps',
+		description: "Replaces the outputs of the last N tool calls with an 'erased' placeholder. Use this to quickly clean up memory after realizing your most recent steps or explorations were a dead end.",
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				steps_count: {
+					type: 'INTEGER',
+					description: 'The number of recent tool outputs to erase from memory (counting backwards from the most recent call).'
+				}
+			},
+			required: ['steps_count']
+		}
+	},
 	{
 		name: 'list_directory_structure',
 		description: 'Lists the files and folders in a directory recursively up to a certain depth to understand the project workspace layout.',
@@ -3894,7 +4037,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					result = { error: `Tool "${name}" is not implemented.` };
 				} else {
 					try {
-						result = await tool_fn(args);
+						result = await tool_fn(args, history);
 					} catch (err) {
 						result = { error: err.message || String(err) };
 					}
