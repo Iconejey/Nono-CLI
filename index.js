@@ -148,6 +148,17 @@ function pruneHistory(history) {
 							response.stderr_truncated = true;
 						}
 					}
+					// Truncate run_node_script
+					if (part.functionResponse.name === 'run_node_script') {
+						if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
+							response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
+							response.stdout_truncated = true;
+						}
+						if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
+							response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
+							response.stderr_truncated = true;
+						}
+					}
 					// Truncate view_file_git_diff
 					if (part.functionResponse.name === 'view_file_git_diff' && typeof response.diff === 'string') {
 						if (response.diff.length > 1000) {
@@ -395,6 +406,11 @@ function formatToolCallProgress(name, args) {
 		}
 		case 'execute_system_command': {
 			return `Running "${args.command}"`;
+		}
+		case 'run_node_script': {
+			const first_line = (args.code || '').split('\n')[0].trim();
+			const snippet = first_line.length > 50 ? first_line.slice(0, 47) + '...' : first_line;
+			return `Running Node script: "${snippet}"`;
 		}
 		case 'propose_terminal_input': {
 			return `Proposing terminal input: "${args.command_to_inject}"`;
@@ -1617,6 +1633,43 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 	});
 }
 
+function runNodeScript({ code, timeout_ms = 30000 }) {
+	return new Promise(resolve => {
+		const child = exec('node', { timeout: timeout_ms }, (error, stdout, stderr) => {
+			const clean_stdout = stripAnsi(stdout || '');
+			const clean_stderr = stripAnsi(stderr || '');
+
+			const max_chars = 30000;
+			let truncated_stdout = clean_stdout;
+			let truncated_stderr = clean_stderr;
+			let stdout_truncated = false;
+			let stderr_truncated = false;
+
+			if (clean_stdout && clean_stdout.length > max_chars) {
+				truncated_stdout = clean_stdout.slice(0, max_chars) + '\n[... stdout truncated to prevent excessive token usage ...]';
+				stdout_truncated = true;
+			}
+			if (clean_stderr && clean_stderr.length > max_chars) {
+				truncated_stderr = clean_stderr.slice(0, max_chars) + '\n[... stderr truncated to prevent excessive token usage ...]';
+				stderr_truncated = true;
+			}
+
+			resolve({
+				stdout: truncated_stdout,
+				stderr: truncated_stderr,
+				stdout_truncated,
+				stderr_truncated,
+				exit_code: error ? error.code || 1 : 0
+			});
+		});
+
+		if (child.stdin) {
+			child.stdin.write(code);
+			child.stdin.end();
+		}
+	});
+}
+
 function proposeTerminalInput({ command_to_inject }) {
 	if (!is_kitty) {
 		return Promise.resolve({
@@ -1781,6 +1834,7 @@ const tools_mapping = {
 	patch_file: patchFile,
 	search_grep: searchGrep,
 	execute_system_command: executeSystemCommand,
+	run_node_script: runNodeScript,
 	propose_terminal_input: proposeTerminalInput,
 	read_terminal_buffer: readTerminalBuffer,
 	view_file_git_diff: viewFileGitDiff,
@@ -1923,6 +1977,18 @@ const tools_declarations = [
 				timeout_ms: { type: 'INTEGER', description: 'Maximum execution time in milliseconds (default: 30000).' }
 			},
 			required: ['command']
+		}
+	},
+	{
+		name: 'run_node_script',
+		description: `Runs a custom JavaScript (Node.js) script by writing the code directly to Node's standard input. Returns stdout, stderr, and exit status code. Note: stdout and stderr exceeding 30,000 characters each will be truncated.`,
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				code: { type: 'STRING', description: 'The precise JavaScript code to execute.' },
+				timeout_ms: { type: 'INTEGER', description: 'Maximum execution time in milliseconds (default: 30000).' }
+			},
+			required: ['code']
 		}
 	},
 	...(is_kitty
