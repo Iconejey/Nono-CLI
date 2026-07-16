@@ -1604,6 +1604,12 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 }
 
 function proposeTerminalInput({ command_to_inject }) {
+	if (!is_kitty) {
+		return Promise.resolve({
+			status: 'error',
+			error: 'Could not propose terminal input (Kitty terminal is not detected)'
+		});
+	}
 	return new Promise(resolve => {
 		const window_id = process.env.KITTY_WINDOW_ID;
 		const match_arg = window_id ? `--match id:${window_id}` : '';
@@ -1687,6 +1693,8 @@ function getOSDescription() {
 
 const os_name = getOSDescription();
 
+const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID || !!process.env.KITTY_WINDOW_ID;
+
 // ----------------------------------------------------
 // Gemini Tool Declarations
 // ----------------------------------------------------
@@ -1766,25 +1774,29 @@ const tools_declarations = [
 			required: ['command']
 		}
 	},
-	{
-		name: 'propose_terminal_input',
-		description: "Injects text straight into the user's active Zsh prompt using Kitty's remote control feature, leaving the user to hit Enter.",
-		parameters: {
-			type: 'OBJECT',
-			properties: {
-				command_to_inject: { type: 'STRING', description: 'The command string to stage on the user shell line.' }
-			},
-			required: ['command_to_inject']
-		}
-	},
-	{
-		name: 'read_terminal_buffer',
-		description: 'Reads the active terminal buffer history (last 100 lines) from the Kitty terminal.',
-		parameters: {
-			type: 'OBJECT',
-			properties: {}
-		}
-	}
+	...(is_kitty
+		? [
+				{
+					name: 'propose_terminal_input',
+					description: "Injects text straight into the user's active Zsh prompt using Kitty's remote control feature, leaving the user to hit Enter.",
+					parameters: {
+						type: 'OBJECT',
+						properties: {
+							command_to_inject: { type: 'STRING', description: 'The command string to stage on the user shell line.' }
+						},
+						required: ['command_to_inject']
+					}
+				},
+				{
+					name: 'read_terminal_buffer',
+					description: 'Reads the active terminal buffer history (last 100 lines) from the Kitty terminal.',
+					parameters: {
+						type: 'OBJECT',
+						properties: {}
+					}
+				}
+			]
+		: [])
 ];
 
 const view_file_git_diff_declaration = {
