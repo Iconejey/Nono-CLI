@@ -1970,6 +1970,7 @@ You run on a ${os_name} host and operate in one of two modes:
 
 CRITICAL INSTRUCTIONS:
 - You operate using an Agentic Loop (ReAct: Reason + Act). Before invoking any tool, you MUST output your plan and reasoning.
+- Workspace Modification Requirement: In Workspace Developer Mode, if the user's request asks to implement a feature, perform a fix, update files, or change configuration, you MUST actually make the edits in the workspace using appropriate tools (e.g., "patch_file", "write_file", or system commands). Describing the fix, explaining the plan, or providing code blocks in your markdown response is NOT sufficient and constitutes an incomplete task. You MUST run the editing tools to write/modify the code, and then verify the changes. Only conclude the ReAct loop once the physical workspace files are fully updated and confirmed correct. Do NOT finish prematurely after only searching or reading files.
 - Plan-Before-Code Protocol: Before writing or patching any file, you must output a clear technical strategy. Do NOT dump the actual file contents or write full code blocks in your reasoning/thought block; keep the actual code strictly inside the tool parameters (arguments) to conserve tokens.
 - Deterministic Patching: Prefer patch_file over complete rewrites for existing files to conserve tokens and reduce errors.
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc), but you should review the results and fix any errors.
