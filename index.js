@@ -38,6 +38,7 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 // Global Progress & Logging State
 let start_time = Date.now();
 let details_path = '';
+let progress_line_active = false;
 
 // Strip ANSI visual escape codes
 function stripAnsi(str) {
@@ -336,9 +337,9 @@ function loadCustomTheme() {
 
 const custom_theme = loadCustomTheme();
 
-function formatProgressLine(text) {
+function formatProgressLine(text, color) {
 	let ansi_prefix = '\x1b[90m'; // Default gray
-	if (text.includes('High-impact') || text.includes('caching required')) {
+	if (color === 'red') {
 		ansi_prefix = '\x1b[31m'; // Red
 	}
 	const ansi_suffix = '\x1b[0m';
@@ -675,8 +676,12 @@ async function highlightRawMarkdown(md) {
 	return output_lines.join('\n');
 }
 
-function updateProgress(raw_text) {
-	const line = formatProgressLine(raw_text);
+function updateProgress(raw_text, color) {
+	if (progress_line_active) {
+		process.stdout.write('\n');
+		progress_line_active = false;
+	}
+	const line = formatProgressLine(raw_text, color);
 	console.log(line);
 }
 
@@ -965,7 +970,8 @@ async function chooseOption(options, headerText = null) {
 
 function askUserInRoll(question) {
 	playChime('question');
-	updateProgress(question);
+	const formattedQuestion = formatProgressLine(question);
+	process.stdout.write(formattedQuestion);
 
 	return new Promise(resolve => {
 		const rl = readline.createInterface({
@@ -1537,7 +1543,7 @@ function searchGrep({ pattern, directory_path }) {
 
 async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 	if (isHighImpactCommand(command)) {
-		updateProgress(`• High-impact action detected: "${command}"`);
+		updateProgress(`• High-impact action detected: "${command}"`, 'red');
 		const answer = await askUserInRoll(`Do you want to run this command? [Y/n]: `);
 		const norm = answer.trim().toLowerCase();
 		if (norm !== '' && norm !== 'y' && norm !== 'yes') {
@@ -1553,7 +1559,7 @@ async function executeSystemCommand({ command, timeout_ms = 30000 }) {
 		try {
 			execSync('sudo -n true', { stdio: 'ignore' });
 		} catch (e) {
-			updateProgress(`• sudo credential caching required. Please authenticate when prompted:`);
+			updateProgress(`• sudo credential caching required. Please authenticate when prompted:`, 'red');
 			playChime('fingerprint');
 			try {
 				await runInteractiveSudo();
@@ -3601,6 +3607,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					const progressLine = formatProgressLine(`• ${tool_progress}`);
 					process.stdout.write(progressLine);
 					printedProgress = true;
+					progress_line_active = true;
 				}
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
@@ -3634,10 +3641,13 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 
 				if (printedProgress) {
-					if (isSummarized) {
-						process.stdout.write('\x1b[90m [sum]\x1b[0m\n');
-					} else {
-						process.stdout.write('\n');
+					if (progress_line_active) {
+						if (isSummarized) {
+							process.stdout.write('\x1b[90m [sum]\x1b[0m\n');
+						} else {
+							process.stdout.write('\n');
+						}
+						progress_line_active = false;
 					}
 				}
 
