@@ -1474,6 +1474,28 @@ function getFileDiffText(oldStr, newStr, file_path) {
 	return Diff.createPatch(file_path, oldStr || '', newStr || '', '', '', { context: 3 });
 }
 
+// Helper to perform syntax check on JavaScript files
+function runNodeSyntaxCheck(file_path) {
+	if (!file_path.toLowerCase().endsWith('.js')) {
+		return null;
+	}
+	try {
+		execSync(`node -c ${JSON.stringify(file_path)}`, {
+			stdio: ['ignore', 'pipe', 'pipe']
+		});
+		return {
+			status: 'passed',
+			output: 'Syntax check passed'
+		};
+	} catch (err) {
+		const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
+		return {
+			status: 'failed',
+			error: error_msg.trim()
+		};
+	}
+}
+
 function writeFile({ file_path, content }) {
 	const abs_path = path.resolve(file_path);
 	const dir = path.dirname(abs_path);
@@ -1492,10 +1514,12 @@ function writeFile({ file_path, content }) {
 	const diff_text = getFileDiffText(old_content, final_content, file_path);
 
 	const lint_result = runProjectDryRun(abs_path);
+	const node_check = runNodeSyntaxCheck(abs_path);
 	return {
 		file_path,
 		status: 'success',
 		diff: diff_text,
+		...(node_check ? { node_check } : {}),
 		...lint_result
 	};
 }
@@ -1533,10 +1557,12 @@ function patchFile({ file_path, search_block, replace_block }) {
 	const diff_text = getFileDiffText(old_content, final_content, file_path);
 
 	const lint_result = runProjectDryRun(abs_path);
+	const node_check = runNodeSyntaxCheck(abs_path);
 	return {
 		file_path,
 		status: 'success',
 		diff: diff_text,
+		...(node_check ? { node_check } : {}),
 		...lint_result
 	};
 }
