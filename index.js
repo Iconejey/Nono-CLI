@@ -3469,6 +3469,65 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		return score >= 3;
 	}
 
+	function guessLanguage(text) {
+		if (!text) return null;
+		const trimmed = text.trim();
+
+		// JSON check
+		if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+			try {
+				JSON.parse(trimmed);
+				return 'json';
+			} catch (e) {}
+		}
+
+		// HTML check
+		if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+			if (trimmed.includes('</div>') || trimmed.includes('</span>') || trimmed.includes('</p>') || trimmed.includes('</a>') || trimmed.includes('</html>')) {
+				return 'html';
+			}
+		}
+
+		// CSS check
+		if (trimmed.includes('{') && trimmed.includes('}') && (trimmed.includes('margin:') || trimmed.includes('padding:') || trimmed.includes('color:') || trimmed.includes('display:'))) {
+			return 'css';
+		}
+
+		// Python check
+		if (/\b(def|class|elif|import)\b/.test(trimmed) && (trimmed.includes(':\n') || trimmed.includes('print('))) {
+			if (!trimmed.includes('{') && !trimmed.includes(';')) {
+				return 'python';
+			}
+		}
+
+		// YAML check
+		if (trimmed.includes('\n- ') || (trimmed.includes(': ') && !trimmed.includes('{') && !trimmed.includes('}'))) {
+			return 'yaml';
+		}
+
+		// Markdown check
+		if (trimmed.startsWith('#') || trimmed.includes('```')) {
+			return 'markdown';
+		}
+
+		// TypeScript check
+		if (/\b(interface|type|as\s+\w+|any|namespace|public|private|readonly)\b/.test(trimmed)) {
+			return 'typescript';
+		}
+
+		// Default JS/TS check
+		if (/\b(const|let|var|function|return|import|export|class|await|async)\b/.test(trimmed) || trimmed.includes('=>') || trimmed.includes('console.log')) {
+			return 'javascript';
+		}
+
+		// Fallback if isLikelyCode
+		if (isLikelyCode(trimmed)) {
+			return 'javascript';
+		}
+
+		return null;
+	}
+
 	function getVscodeSelection() {
 		const commands = ['wl-paste -p', 'wl-paste', 'xclip -o -selection primary', 'xclip -o -selection clipboard', 'xsel -p -o', 'xsel -b -o'];
 
@@ -3516,7 +3575,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 
 		if (hasVscodeFlag) {
-			const selectionText = getVscodeSelection();
+			let selectionText = getVscodeSelection();
 			if (!selectionText || !selectionText.trim()) {
 				console.error('\x1b[31mError: No selected text found in VS Code / system clipboard.\x1b[0m');
 				console.error('Please highlight some text in VS Code first.');
@@ -3526,6 +3585,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			const root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
 			const detectedFile = findFileContainingSelection(selectionText, root);
 			const detectedLang = getLanguageFromExtension(detectedFile);
+
+			if (detectedLang) {
+				try {
+					selectionText = await formatCodeWithPrettier(selectionText, detectedLang);
+				} catch (e) {
+					// silent
+				}
+			}
 
 			console.log('\n\x1b[36m✦ VSCode Selected Text Detected:\x1b[0m');
 			if (detectedFile) {
@@ -3676,10 +3743,19 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 
 		if (hasClipboardFlag) {
-			const clipboardText = getClipboardText();
+			let clipboardText = getClipboardText();
 			if (!clipboardText || !clipboardText.trim()) {
 				console.error('\x1b[31mError: No text found in clipboard.\x1b[0m');
 				process.exit(1);
+			}
+
+			const guessedLang = guessLanguage(clipboardText);
+			if (guessedLang) {
+				try {
+					clipboardText = await formatCodeWithPrettier(clipboardText, guessedLang);
+				} catch (e) {
+					// silent
+				}
 			}
 
 			console.log('\n\x1b[36m✦ Clipboard Text Detected:\x1b[0m');
@@ -3698,7 +3774,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			console.log(highlighted);
 			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
 
-			clipboard_context = `\n\n[Clipboard Context]\n\`\`\`\n${clipboardText.trim()}\n\`\`\``;
+			const codeBlockLang = guessedLang || '';
+			clipboard_context = `\n\n[Clipboard Context]\n\`\`\`${codeBlockLang}\n${clipboardText.trim()}\n\`\`\``;
 		}
 
 		if (process.argv[2] === '--write' || process.argv[2] === '-w') {
