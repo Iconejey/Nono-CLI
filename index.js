@@ -29,7 +29,7 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -2055,7 +2055,7 @@ const view_file_git_diff_declaration = {
 	}
 };
 
-const system_prompt = `You are Nono, an ultra-efficient CLI AI Agent & Coding Workspace Specialist.
+let system_prompt = `You are Nono, an ultra-efficient CLI AI Agent & Coding Workspace Specialist.
 You run on a ${os_name} host and operate in one of two modes:
 1. System Admin Mode: Focused on minimal, precise system calls (NetworkManager, systemctl, diagnostics).
 2. Workspace Developer Mode: Focused on codebase understanding, editing, and software engineering.
@@ -2078,7 +2078,7 @@ Guidelines:
 - Always specify the language name (e.g., \`\`\`javascript, \`\`\`python, \`\`\`bash) when writing a markdown code block to ensure proper terminal syntax highlighting.
 `;
 
-const pr_review_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
+let pr_review_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
 You are running in a temporary clone of the repository.
 
 Your objectives:
@@ -2097,7 +2097,7 @@ Constraints:
 
 Provide your final report as your final text message without calling any more tools.`;
 
-const pr_review_comment_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
+let pr_review_comment_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
 You are running in a temporary clone of the repository.
 
 Your objectives:
@@ -2135,6 +2135,47 @@ Interaction Flow:
 }
 \`\`\`
 and state that there are no further issues.`;
+
+// Find all nono.md files from current folder up to root
+function findNonoFiles(startDir) {
+	const files = [];
+	let currentDir = path.resolve(startDir);
+	while (true) {
+		const filePath = path.join(currentDir, 'nono.md');
+		if (fs.existsSync(filePath)) {
+			try {
+				const stat = fs.statSync(filePath);
+				if (stat.isFile()) {
+					files.push(filePath);
+				}
+			} catch (e) {}
+		}
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) {
+			break;
+		}
+		currentDir = parentDir;
+	}
+	return files;
+}
+
+// Gather content of all nono.md files found and append to system prompts
+const nonoFiles = findNonoFiles(process.cwd());
+if (nonoFiles.length > 0) {
+	let customInstructions = '\n\n=========================================\nADDITIONAL USER INSTRUCTIONS & DETAILS:\n';
+	for (const file of nonoFiles) {
+		try {
+			const content = fs.readFileSync(file, 'utf8');
+			customInstructions += `\n--- From: ${file} ---\n${content}\n`;
+		} catch (e) {
+			// ignore read errors
+		}
+	}
+	customInstructions += '=========================================\n';
+	system_prompt += customInstructions;
+	pr_review_system_prompt += customInstructions;
+	pr_review_comment_system_prompt += customInstructions;
+}
 
 // Helper to log token consumption metrics
 function logTokenUsage(model, usageMetadata, prompt) {
@@ -2251,7 +2292,7 @@ async function main() {
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
-\x1b[35m✦ Nono - Ultra-efficient CLI AI Agent & Coding Workspace Specialist ✦\x1b[0m
+\x1b[35m✦ Nono - Ultra-efficient CLI AI Agent & Coding\x1b[0m
 
 \x1b[1mUsage:\x1b[0m
   nono                       Start Nono in interactive mode
@@ -2263,6 +2304,8 @@ async function main() {
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
+  nono --list-instructions   List the path of each nono.md file that will be used in the current folder
+  nono --add-instructions    Create an empty nono.md file and open it in VS Code
   nono --commit              Generate commit message suggestions for staged edits and commit
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
@@ -2274,9 +2317,50 @@ async function main() {
 		return;
 	}
 
+	// Handle --list-instructions command
+	if (process.argv[2] === '--list-instructions') {
+		const files = findNonoFiles(process.cwd());
+		if (files.length === 0) {
+			console.log('No nono.md files found in the current folder or any of its parent folders.');
+		} else {
+			console.log('\x1b[35m✦ Active nono.md instruction files ✦\x1b[0m\n');
+			files.forEach((file, index) => {
+				console.log(`  [${index + 1}] ${file}`);
+			});
+		}
+		process.exit(0);
+		return;
+	}
+
+	// Handle --add-instructions command
+	if (process.argv[2] === '--add-instructions') {
+		const filePath = path.join(process.cwd(), 'nono.md');
+		if (!fs.existsSync(filePath)) {
+			try {
+				fs.writeFileSync(filePath, '', 'utf8');
+				console.log(`Created empty nono.md file at: ${filePath}`);
+			} catch (e) {
+				console.error(`Error creating nono.md file: ${e.message}`);
+				process.exit(1);
+			}
+		} else {
+			console.log(`nono.md file already exists at: ${filePath}`);
+		}
+
+		console.log(`Opening nono.md in VS Code...`);
+		exec(`code ${JSON.stringify(filePath)}`, error => {
+			if (error) {
+				console.error(`Failed to open VS Code: ${error.message}`);
+				process.exit(1);
+			}
+			process.exit(0);
+		});
+		return;
+	}
+
 	// Handle nono --get-pricing command
 	if (process.argv[2] === '--get-pricing') {
-		console.log('\x1b[35m✦ Fetching current pricing and country information... ✦\x1b[0m\n');
+		console.log('\x1b[35m✦ Fetching current pricing and country information...\x1b[0m\n');
 
 		const countryName = process.env.NONO_COUNTRY || 'France';
 
