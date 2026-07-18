@@ -3999,6 +3999,29 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 	}
 
+	// Compress history if needed at the start of a new task
+	if (history.length > 0 && ai) {
+		try {
+			const token_count_res = await ai.models.countTokens({
+				model: model_name,
+				contents: history
+			});
+			const total_tokens = token_count_res.totalTokens || 0;
+
+			const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
+
+			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
+
+			if (total_tokens > token_limit && user_turns >= 3) {
+				console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
+				await handleBackgroundSummarization(session_path);
+				history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+			}
+		} catch (e) {
+			// Fail silently
+		}
+	}
+
 	// Ingest environmental context
 	let project_root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
 
@@ -4471,38 +4494,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	// Save final history state
 	pruneHistory(history);
 	fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
-
-	// Check token count and prompt for background summarization if needed
-	try {
-		if (ai && process.stdin.isTTY) {
-			const tokenCountRes = await ai.models.countTokens({
-				model: model_name,
-				contents: history
-			});
-			const totalTokens = tokenCountRes.totalTokens || 0;
-
-			// Count user turns
-			const userTurns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
-
-			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
-
-			if (totalTokens > token_limit && userTurns >= 3) {
-				console.log(`\n\x1b[33m⚡ Session history is growing large (${totalTokens} tokens, ${userTurns} turns).\x1b[0m`);
-				const answer = await askUser('Would you like to compress history in the background? [y/N]: ');
-				const norm = answer.trim().toLowerCase();
-				if (norm === 'y' || norm === 'yes') {
-					console.log('Spawning background summarization process...');
-					const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--summarize-background', session_path], {
-						detached: true,
-						stdio: 'ignore'
-					});
-					child.unref();
-				}
-			}
-		}
-	} catch (e) {
-		// Fail silently
-	}
 }
 
 main().catch(err => {
