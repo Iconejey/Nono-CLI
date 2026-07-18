@@ -2323,7 +2323,6 @@ async function main() {
 		if (files.length === 0) {
 			console.log('No nono.md files found in the current folder or any of its parent folders.');
 		} else {
-			console.log('\x1b[35m✦ Active nono.md instruction files ✦\x1b[0m\n');
 			files.forEach((file, index) => {
 				console.log(`  [${index + 1}] ${file}`);
 			});
@@ -2744,7 +2743,7 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			process.exit(1);
 		}
 
-		console.log('\x1b[35m✦ Generating git commit message suggestions... ✦\x1b[0m\n');
+		console.log('\x1b[35m✦ Generating git commit message suggestions...\x1b[0m\n');
 
 		// 3. Call Gemini to generate suggestions
 		try {
@@ -3224,7 +3223,7 @@ fix: resolve null pointer exception in checkout flow`;
 			process.exit(1);
 		}
 
-		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}... ✦\x1b[0m\n`);
+		console.log(`\x1b[35m✦ Initiating Github PR Review for ${owner}/${repo}#${pullNumber}...\x1b[0m\n`);
 
 		githubFetch = async function (url, options = {}) {
 			const headers = {
@@ -4356,7 +4355,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	// Post comments to GitHub Review if comment mode is active
 	if (isCommentMode) {
 		if (prComments.length > 0) {
-			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post. ✦\x1b[0m\n`);
+			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post.\x1b[0m\n`);
 			let shouldPost = false;
 			if (isAutoMode) {
 				shouldPost = true;
