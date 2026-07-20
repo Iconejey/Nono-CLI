@@ -17,7 +17,10 @@ const dir_name = path.dirname(fileURLToPath(import.meta.url));
 process.env.DOTENV_LOG_LEVEL = 'none';
 process.env.DOTENVX_LOG_LEVEL = 'none';
 dotenv.config({ path: path.join(dir_name, '.env'), quiet: true });
-dotenv.config({ path: path.join(os.homedir(), '.config', 'nono', '.env'), quiet: true });
+dotenv.config({
+	path: path.join(os.homedir(), '.config', 'nono', '.env'),
+	quiet: true
+});
 dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
 
 const api_key = process.env.GEMINI_API_KEY;
@@ -505,7 +508,11 @@ async function formatMarkdownForTerminal(md) {
 				if (is_highlighted) {
 					try {
 						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-						highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+						highlighted_text = cliHighlight.highlight(formatted_code, {
+							language: code_block_lang,
+							ignoreIllegals: true,
+							theme: custom_theme
+						});
 					} catch (e) {
 						// fallback
 					}
@@ -567,7 +574,11 @@ async function formatMarkdownForTerminal(md) {
 		if (is_highlighted) {
 			try {
 				const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-				highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+				highlighted_text = cliHighlight.highlight(formatted_code, {
+					language: code_block_lang,
+					ignoreIllegals: true,
+					theme: custom_theme
+				});
 			} catch (e) {
 				// fallback
 			}
@@ -675,7 +686,15 @@ async function highlightRawMarkdown(md) {
 				code_block_lang = line.trim().slice(3).trim();
 				code_block_lines = [];
 				// Highlight the code block opening tag as markdown
-				output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+				output_lines.push(
+					cliHighlight
+						.highlight(line, {
+							language: 'markdown',
+							ignoreIllegals: true,
+							theme: custom_theme
+						})
+						.trimEnd()
+				);
 			} else {
 				in_code_block = false;
 				const code_text = code_block_lines.join('\n');
@@ -684,14 +703,26 @@ async function highlightRawMarkdown(md) {
 				if (is_highlighted) {
 					try {
 						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-						highlighted_text = cliHighlight.highlight(formatted_code, { language: code_block_lang, ignoreIllegals: true, theme: custom_theme });
+						highlighted_text = cliHighlight.highlight(formatted_code, {
+							language: code_block_lang,
+							ignoreIllegals: true,
+							theme: custom_theme
+						});
 					} catch (e) {
 						// fallback
 					}
 				}
 				output_lines.push(highlighted_text.trimEnd());
 				// Highlight the code block closing tag as markdown
-				output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+				output_lines.push(
+					cliHighlight
+						.highlight(line, {
+							language: 'markdown',
+							ignoreIllegals: true,
+							theme: custom_theme
+						})
+						.trimEnd()
+				);
 			}
 			continue;
 		}
@@ -700,7 +731,15 @@ async function highlightRawMarkdown(md) {
 			code_block_lines.push(line);
 		} else {
 			// Highlight standard markdown line
-			output_lines.push(cliHighlight.highlight(line, { language: 'markdown', ignoreIllegals: true, theme: custom_theme }).trimEnd());
+			output_lines.push(
+				cliHighlight
+					.highlight(line, {
+						language: 'markdown',
+						ignoreIllegals: true,
+						theme: custom_theme
+					})
+					.trimEnd()
+			);
 		}
 	}
 	return output_lines.join('\n');
@@ -1019,7 +1058,9 @@ function askUserInRoll(question) {
 // Helper to run sudo true interactively and capture stdout/stderr in the roll
 function runInteractiveSudo() {
 	return new Promise((resolve, reject) => {
-		const child = spawn('sudo', ['true'], { stdio: ['inherit', 'pipe', 'pipe'] });
+		const child = spawn('sudo', ['true'], {
+			stdio: ['inherit', 'pipe', 'pipe']
+		});
 
 		child.stdout.on('data', data => {
 			const text = data.toString().trim();
@@ -1471,7 +1512,9 @@ function getLineDiff(oldStr, newStr) {
 
 // Helper to generate standard unified diff between two file states using Diff library
 function getFileDiffText(oldStr, newStr, file_path) {
-	return Diff.createPatch(file_path, oldStr || '', newStr || '', '', '', { context: 3 });
+	return Diff.createPatch(file_path, oldStr || '', newStr || '', '', '', {
+		context: 3
+	});
 }
 
 // Helper to perform syntax check on JavaScript files
@@ -1732,7 +1775,10 @@ function isIgnoredFile(filepath) {
 
 function viewFileGitDiff({ base_branch, file_path }) {
 	if (file_path && isIgnoredFile(file_path)) {
-		return Promise.resolve({ status: 'success', diff: '(Diff ignored for lockfile)' });
+		return Promise.resolve({
+			status: 'success',
+			diff: '(Diff ignored for lockfile)'
+		});
 	}
 	return new Promise(resolve => {
 		const cmd = file_path ? `git diff origin/${base_branch}...HEAD -- ${JSON.stringify(file_path)}` : `git diff origin/${base_branch}...HEAD -- . ':!*package-lock.json' ':!*yarn.lock' ':!*pnpm-lock.yaml' ':!*Cargo.lock' ':!*go.sum'`;
@@ -1740,7 +1786,10 @@ function viewFileGitDiff({ base_branch, file_path }) {
 			if (error && error.code !== 1) {
 				resolve({ status: 'error', error: stderr || error.message });
 			} else {
-				resolve({ status: 'success', diff: (stdout || '').trim() || 'No differences.' });
+				resolve({
+					status: 'success',
+					diff: (stdout || '').trim() || 'No differences.'
+				});
 			}
 		});
 	});
@@ -1937,8 +1986,14 @@ const tools_declarations = [
 		parameters: {
 			type: 'OBJECT',
 			properties: {
-				directory_path: { type: 'STRING', description: 'The absolute or relative path to the directory.' },
-				depth: { type: 'INTEGER', description: 'Maximum depth of recursion (default: 2).' }
+				directory_path: {
+					type: 'STRING',
+					description: 'The absolute or relative path to the directory.'
+				},
+				depth: {
+					type: 'INTEGER',
+					description: 'Maximum depth of recursion (default: 2).'
+				}
 			},
 			required: ['directory_path']
 		}
@@ -1950,8 +2005,14 @@ const tools_declarations = [
 			type: 'OBJECT',
 			properties: {
 				file_path: { type: 'STRING', description: 'The path to the file.' },
-				start_line: { type: 'INTEGER', description: 'Optional line number to start reading from.' },
-				end_line: { type: 'INTEGER', description: 'Optional line number to stop reading at.' }
+				start_line: {
+					type: 'INTEGER',
+					description: 'Optional line number to start reading from.'
+				},
+				end_line: {
+					type: 'INTEGER',
+					description: 'Optional line number to stop reading at.'
+				}
 			},
 			required: ['file_path']
 		}
@@ -1962,8 +2023,14 @@ const tools_declarations = [
 		parameters: {
 			type: 'OBJECT',
 			properties: {
-				file_path: { type: 'STRING', description: 'Path where the file should be created/written.' },
-				content: { type: 'STRING', description: 'The exact textual content to write.' }
+				file_path: {
+					type: 'STRING',
+					description: 'Path where the file should be created/written.'
+				},
+				content: {
+					type: 'STRING',
+					description: 'The exact textual content to write.'
+				}
 			},
 			required: ['file_path', 'content']
 		}
@@ -1975,8 +2042,14 @@ const tools_declarations = [
 			type: 'OBJECT',
 			properties: {
 				file_path: { type: 'STRING', description: 'Path to the target file.' },
-				search_block: { type: 'STRING', description: 'The original code block to find.' },
-				replace_block: { type: 'STRING', description: 'The new code block to substitute.' }
+				search_block: {
+					type: 'STRING',
+					description: 'The original code block to find.'
+				},
+				replace_block: {
+					type: 'STRING',
+					description: 'The new code block to substitute.'
+				}
 			},
 			required: ['file_path', 'search_block', 'replace_block']
 		}
@@ -1987,8 +2060,14 @@ const tools_declarations = [
 		parameters: {
 			type: 'OBJECT',
 			properties: {
-				pattern: { type: 'STRING', description: 'The regex pattern or substring to search for.' },
-				directory_path: { type: 'STRING', description: 'The directory root to search inside.' }
+				pattern: {
+					type: 'STRING',
+					description: 'The regex pattern or substring to search for.'
+				},
+				directory_path: {
+					type: 'STRING',
+					description: 'The directory root to search inside.'
+				}
 			},
 			required: ['pattern']
 		}
@@ -1999,8 +2078,14 @@ const tools_declarations = [
 		parameters: {
 			type: 'OBJECT',
 			properties: {
-				command: { type: 'STRING', description: "The exact terminal command to run (e.g. 'nmcli dev wifi list', 'cargo build')." },
-				timeout_ms: { type: 'INTEGER', description: 'Maximum execution time in milliseconds (default: 30000).' }
+				command: {
+					type: 'STRING',
+					description: "The exact terminal command to run (e.g. 'nmcli dev wifi list', 'cargo build')."
+				},
+				timeout_ms: {
+					type: 'INTEGER',
+					description: 'Maximum execution time in milliseconds (default: 30000).'
+				}
 			},
 			required: ['command']
 		}
@@ -2011,8 +2096,14 @@ const tools_declarations = [
 		parameters: {
 			type: 'OBJECT',
 			properties: {
-				code: { type: 'STRING', description: 'The precise JavaScript code to execute.' },
-				timeout_ms: { type: 'INTEGER', description: 'Maximum execution time in milliseconds (default: 30000).' }
+				code: {
+					type: 'STRING',
+					description: 'The precise JavaScript code to execute.'
+				},
+				timeout_ms: {
+					type: 'INTEGER',
+					description: 'Maximum execution time in milliseconds (default: 30000).'
+				}
 			},
 			required: ['code']
 		}
@@ -2025,7 +2116,10 @@ const tools_declarations = [
 					parameters: {
 						type: 'OBJECT',
 						properties: {
-							command_to_inject: { type: 'STRING', description: 'The command string to stage on the user shell line.' }
+							command_to_inject: {
+								type: 'STRING',
+								description: 'The command string to stage on the user shell line.'
+							}
 						},
 						required: ['command_to_inject']
 					}
@@ -2048,8 +2142,14 @@ const view_file_git_diff_declaration = {
 	parameters: {
 		type: 'OBJECT',
 		properties: {
-			base_branch: { type: 'STRING', description: 'The base branch of the PR.' },
-			file_path: { type: 'STRING', description: 'The relative path of the file to inspect. If omitted, returns the diff for all changed files.' }
+			base_branch: {
+				type: 'STRING',
+				description: 'The base branch of the PR.'
+			},
+			file_path: {
+				type: 'STRING',
+				description: 'The relative path of the file to inspect. If omitted, returns the diff for all changed files.'
+			}
 		},
 		required: ['base_branch']
 	}
@@ -2749,7 +2849,9 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		try {
 			let previousCommits = '';
 			try {
-				previousCommits = execSync('git log -n 10 --format=%s', { encoding: 'utf8' }).trim();
+				previousCommits = execSync('git log -n 10 --format=%s', {
+					encoding: 'utf8'
+				}).trim();
 			} catch (e) {
 				// Ignore if no commits yet
 			}
@@ -3410,7 +3512,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		let files = [];
 		if (rootDir) {
 			try {
-				const gitOutput = execSync('git ls-files', { cwd: rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+				const gitOutput = execSync('git ls-files', {
+					cwd: rootDir,
+					encoding: 'utf8',
+					stdio: ['ignore', 'pipe', 'ignore']
+				});
 				files = gitOutput
 					.split('\n')
 					.filter(Boolean)
@@ -3616,7 +3722,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 		for (const cmd of commands) {
 			try {
-				const output = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+				const output = execSync(cmd, {
+					stdio: ['ignore', 'pipe', 'ignore'],
+					encoding: 'utf8'
+				});
 				if (output && output.trim()) {
 					return output;
 				}
@@ -3632,7 +3741,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 		for (const cmd of commands) {
 			try {
-				const output = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+				const output = execSync(cmd, {
+					stdio: ['ignore', 'pipe', 'ignore'],
+					encoding: 'utf8'
+				});
 				if (output && output.trim()) {
 					return output;
 				}
@@ -3728,7 +3840,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			let startLine = null;
 			let endLine = null;
 
-			const rangeMatch = fileArg.match(/:(\d+)-(\d+)$/);
+			const rangeMatch = fileArg.match(/:(\d+)[-:](\d+)$/);
 			const singleMatch = fileArg.match(/:(\d+)$/);
 
 			if (rangeMatch) {
@@ -4209,7 +4321,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							});
 							history.push({
 								role: 'user',
-								parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
+								parts: [
+									{
+										text: 'User chose to comment on this issue. Please present the next issue.'
+									}
+								]
 							});
 							console.log(`\x1b[32mAutomatically saved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
 						} else {
@@ -4222,7 +4338,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									lastIssueJson = null;
 									history.push({
 										role: 'user',
-										parts: [{ text: 'User chose to skip this issue. Please present the next issue.' }]
+										parts: [
+											{
+												text: 'User chose to skip this issue. Please present the next issue.'
+											}
+										]
 									});
 									console.log('\x1b[90mSkipping issue...\x1b[0m\n');
 								} else if (choice === 'c' || choice === 'comment') {
@@ -4236,7 +4356,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									});
 									history.push({
 										role: 'user',
-										parts: [{ text: 'User chose to comment on this issue. Please present the next issue.' }]
+										parts: [
+											{
+												text: 'User chose to comment on this issue. Please present the next issue.'
+											}
+										]
 									});
 									console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
 								} else if (choice === 'w' || choice === 'write') {
@@ -4258,7 +4382,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							lastIssueJson = null;
 							history.push({
 								role: 'user',
-								parts: [{ text: 'Please present the next issue (or state "No more issues" if there are none).' }]
+								parts: [
+									{
+										text: 'Please present the next issue (or state "No more issues" if there are none).'
+									}
+								]
 							});
 							console.log('\x1b[90mAutomatically proceeding to next issue...\x1b[0m\n');
 						} else {
@@ -4267,7 +4395,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 								lastIssueJson = null;
 								history.push({
 									role: 'user',
-									parts: [{ text: 'Please present the next issue (or state "No more issues" if there are none).' }]
+									parts: [
+										{
+											text: 'Please present the next issue (or state "No more issues" if there are none).'
+										}
+									]
 								});
 							} else {
 								history.push({
@@ -4425,7 +4557,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						// 1. Get HEAD commit SHA
 						let commit_id;
 						try {
-							commit_id = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+							commit_id = execSync('git rev-parse HEAD', {
+								encoding: 'utf8'
+							}).trim();
 						} catch (e) {
 							// Omit commit_id if git rev-parse fails
 						}
