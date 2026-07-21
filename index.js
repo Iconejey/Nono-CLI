@@ -497,8 +497,95 @@ async function formatCodeWithPrettier(code, lang) {
 }
 
 // Helper to format markdown text beautifully for the terminal output
-async function formatMarkdownForTerminal(md) {
+function processInlineStyles(line) {
+	line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
+	line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
+	line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
+	return line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
+}
+
+function formatTable(table_lines) {
+	if (table_lines.length < 2) return table_lines;
+
+	const first_line = table_lines[0];
+	const indent_match = first_line.match(/^\s*/);
+	const indent = indent_match ? indent_match[0] : '';
+
+	const parseRowCells = line => {
+		const trimmed = line.trim();
+		const parts = trimmed.split(/(?<!\\)\|/);
+		return parts.slice(1, parts.length - 1).map(c => c.trim().replace(/\\\|/g, '|'));
+	};
+
+	const rows = [];
+	for (let i = 0; i < table_lines.length; i++) {
+		if (i === 1) continue;
+		const cells = parseRowCells(table_lines[i]);
+		const processed_cells = cells.map(c => processInlineStyles(c));
+		rows.push({
+			index: i,
+			processed: processed_cells
+		});
+	}
+
+	if (rows.length === 0) return table_lines;
+	const num_cols = rows[0].processed.length;
+	if (num_cols === 0) return table_lines;
+
+	const stripAnsi = str => str.replace(/\x1b\[[0-9;]*m/g, '');
+
+	const col_widths = [];
+	for (let col_idx = 0; col_idx < num_cols; col_idx++) {
+		let max_w = 0;
+		for (const row of rows) {
+			const cell = row.processed[col_idx] || '';
+			const visual_len = stripAnsi(cell).length;
+			if (visual_len > max_w) max_w = visual_len;
+		}
+		col_widths.push(max_w);
+	}
+
+	const buildBorderLine = (start_char, mid_char, end_char) => {
+		let result = start_char;
+		for (let j = 0; j < num_cols; j++) {
+			result += '─'.repeat(col_widths[j] + 2);
+			if (j < num_cols - 1) result += mid_char;
+		}
+		result += end_char;
+		return indent + result;
+	};
+
+	const top_border = buildBorderLine('┌', '┬', '┐');
+	const separator_row = buildBorderLine('├', '┼', '┤');
+	const bottom_border = buildBorderLine('└', '┴', '┘');
+
+	const formatRow = processed_cells => {
+		let result = '│';
+		for (let j = 0; j < num_cols; j++) {
+			const cell = processed_cells[j] || '';
+			const visual_len = stripAnsi(cell).length;
+			const padding_len = col_widths[j] - visual_len;
+			result += ' ' + cell + ' '.repeat(padding_len) + ' │';
+		}
+		return indent + result;
+	};
+
+	const formatted = [];
+	formatted.push(top_border);
+	formatted.push(formatRow(rows[0].processed));
+	formatted.push(separator_row);
+
+	for (let i = 1; i < rows.length; i++) {
+		formatted.push(formatRow(rows[i].processed));
+	}
+
+	formatted.push(bottom_border);
+	return formatted;
+}
+
+async function formatMarkdownForTerminal(md, options = {}) {
 	if (!md) return '';
+	const header_color = options?.header_color ?? '\x1b[1;35m';
 	try {
 		md = await formatCodeWithPrettier(md, 'markdown');
 	} catch (e) {
@@ -509,8 +596,28 @@ async function formatMarkdownForTerminal(md) {
 	let in_code_block = false;
 	let code_block_lines = [];
 	let code_block_lang = '';
+	let table_lines = [];
+
+	const flushTable = () => {
+		if (table_lines.length > 0) {
+			const formatted_table = formatTable(table_lines);
+			for (const t_line of formatted_table) {
+				formatted_lines.push(t_line);
+			}
+			table_lines = [];
+		}
+	};
 
 	for (let line of lines) {
+		const is_table_line = line.trim().startsWith('|') && line.trim().endsWith('|');
+
+		if (is_table_line && !in_code_block) {
+			table_lines.push(line);
+			continue;
+		}
+
+		flushTable();
+
 		// Handle Code Block delimiters
 		if (line.trim().startsWith('```')) {
 			if (!in_code_block) {
@@ -554,11 +661,22 @@ async function formatMarkdownForTerminal(md) {
 		// Skip horizontal rules/thematic breaks ('---')
 		if (line.trim() === '---') continue;
 
-		// Handle Headers: convert ### Title to Bold Purple
+		// Handle Headers: convert ### Title to Bold Purple/Blue
 		const header_match = /^#{1,6}\s+(.*)$/.exec(line);
 		if (header_match) {
 			const header_text = header_match[1];
-			formatted_lines.push(`\x1b[1;35m${header_text}\x1b[0m`);
+			formatted_lines.push(`${header_color}${header_text}\x1b[0m`);
+			continue;
+		}
+
+		// Handle Quotes: > quote
+		const quote_match = /^(\s*)>\s?(.*)$/.exec(line);
+		if (quote_match) {
+			const indent = quote_match[1];
+			const content = quote_match[2];
+			let processed_content = processInlineStyles(content);
+			processed_content = processed_content.replace(/\x1b\[0m/g, '\x1b[0m\x1b[90m');
+			formatted_lines.push(`${indent}  \x1b[90m│\x1b[0m  \x1b[90m${processed_content}\x1b[0m`);
 			continue;
 		}
 
@@ -571,18 +689,10 @@ async function formatMarkdownForTerminal(md) {
 		}
 
 		// Process inline styles
-		// 1. Inline code: `code` -> cyan
-		line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
-
-		// 2. Bold: **text** -> Bold
-		line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
-
-		// 3. Italics: *text* or _text_ -> Underline
-		line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
-		line = line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
-
-		formatted_lines.push(line);
+		formatted_lines.push(processInlineStyles(line));
 	}
+
+	flushTable();
 
 	if (in_code_block && code_block_lines.length > 0) {
 		const code_text = code_block_lines.join('\n');
@@ -4734,8 +4844,12 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 }
 
-main().catch(err => {
-	console.error('\x1b[31mFatal error:\x1b[0m', err);
-	playChime('error');
-	process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+	main().catch(err => {
+		console.error('\x1b[31mFatal error:\x1b[0m', err);
+		playChime('error');
+		process.exit(1);
+	});
+}
+
+export { formatMarkdownForTerminal };
