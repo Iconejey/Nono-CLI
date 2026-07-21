@@ -471,6 +471,8 @@ async function formatCodeWithPrettier(code, lang) {
 		const config = (await prettier.resolveConfig(process.cwd())) || {};
 		const formatted = await prettier.format(code, {
 			...config,
+			tabWidth: 4,
+			useTabs: false,
 			parser
 		});
 		return formatted.trimEnd();
@@ -3884,8 +3886,16 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			} else {
 				selectedLines = lines;
 			}
-			const extractedText = selectedLines.join('\n');
+			let extractedText = selectedLines.join('\n');
 			const detectedLang = getLanguageFromExtension(filePath);
+
+			if (detectedLang) {
+				try {
+					extractedText = await formatCodeWithPrettier(extractedText, detectedLang);
+				} catch (e) {
+					// silent
+				}
+			}
 
 			console.log(`\n\x1b[36m✦ File Context Detected:\x1b[0m`);
 			let lineRangeInfo = '';
