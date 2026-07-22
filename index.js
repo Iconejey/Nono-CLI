@@ -769,7 +769,7 @@ function formatElapsedTime(seconds) {
 	return `${seconds}s`;
 }
 
-async function finishProgress(final_text) {
+async function finishProgress(final_text, grounding_sources) {
 	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
@@ -777,6 +777,15 @@ async function finishProgress(final_text) {
 	console.log();
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
 	console.log();
+
+	if (Array.isArray(grounding_sources) && grounding_sources.length > 0) {
+		console.log(`\x1b[90mSources:\x1b[0m`);
+		for (const src of grounding_sources) {
+			console.log(`\x1b[90m• ${src.title || src.uri}: ${src.uri}\x1b[0m`);
+		}
+		console.log();
+	}
+
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
 }
@@ -4171,6 +4180,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 	// Start the ReAct execution loop
 	let pendingSummaryTriggers = [];
+	const grounding_sources = [];
+	const web_search_queries = [];
 	while (true) {
 		try {
 			let response;
@@ -4236,6 +4247,30 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			if (!model_message) {
 				finishProgressError('No response received from model.');
 				break;
+			}
+
+			// Capture and display Google Search Grounding metadata
+			const groundingMetadata = candidate?.groundingMetadata;
+			if (groundingMetadata) {
+				if (Array.isArray(groundingMetadata.webSearchQueries)) {
+					const queries = groundingMetadata.webSearchQueries.filter(q => typeof q === 'string' && q.trim().length > 0);
+					for (const query of queries) {
+						if (!web_search_queries.includes(query)) {
+							web_search_queries.push(query);
+							updateProgress(`• Web Search: "${query}"`);
+						}
+					}
+				}
+				if (Array.isArray(groundingMetadata.groundingChunks)) {
+					for (const chunk of groundingMetadata.groundingChunks) {
+						if (chunk.web && typeof chunk.web.uri === 'string') {
+							const title = chunk.web.title || chunk.web.uri;
+							if (!grounding_sources.some(src => src.uri === chunk.web.uri)) {
+								grounding_sources.push({ uri: chunk.web.uri, title });
+							}
+						}
+					}
+				}
 			}
 
 			if (pendingSummaryTriggers.length > 0) {
@@ -4427,7 +4462,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					continue;
 				} else {
 					// No functions to call, we have reached the final state
-					await finishProgress(text_part ? text_part.text : 'Task completed.');
+					await finishProgress(text_part ? text_part.text : 'Task completed.', grounding_sources);
 					break;
 				}
 			}
