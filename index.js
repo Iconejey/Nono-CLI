@@ -32,7 +32,7 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--last-changes', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--last-changes', '--check-changes', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -2446,6 +2446,7 @@ async function main() {
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
   nono --last-changes        List and interactively select recent commits from the last 14 days
+  nono --check-changes       Check for uncommitted changes and unpushed commits in all repositories
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
   nono --commit              Generate commit message suggestions for staged edits and commit
@@ -3063,6 +3064,111 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 			const formattedMsg = commit.message;
 
 			console.log(`${formattedTime} ${formattedRepo} ${formattedBranch}: ${formattedMsg}`);
+		}
+
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --check-changes command
+	if (process.argv[2] === '--check-changes') {
+		const currentDir = process.cwd();
+		const repos = findGitRepos(currentDir);
+
+		if (repos.length === 0) {
+			console.log('\x1b[31m✦ No git repositories found recursively in the current directory.\x1b[0m');
+			process.exit(0);
+			return;
+		}
+
+		for (const repoPath of repos) {
+			const repoName = path.relative(currentDir, repoPath) || path.basename(repoPath);
+
+			// 1. Check for uncommitted changes
+			let hasUncommitted = false;
+			try {
+				const statusRes = spawnSync('git', ['status', '--porcelain'], { cwd: repoPath, encoding: 'utf8' });
+				if (statusRes.status === 0 && statusRes.stdout.trim().length > 0) {
+					hasUncommitted = true;
+				}
+			} catch (e) {}
+
+			// 2. Check for commits that need to be pushed
+			let unpushedCommits = [];
+			// First, check if the repository has any remotes configured
+			let hasRemotes = false;
+			try {
+				const remoteRes = spawnSync('git', ['remote'], { cwd: repoPath, encoding: 'utf8' });
+				if (remoteRes.status === 0 && remoteRes.stdout.trim().length > 0) {
+					hasRemotes = true;
+				}
+			} catch (e) {}
+
+			if (hasRemotes) {
+				const branches = getBranches(repoPath);
+				for (const branchName of branches) {
+					let upstreamBranch = null;
+					try {
+						const upstreamRes = spawnSync('git', ['rev-parse', '--abbrev-ref', `${branchName}@{upstream}`], { cwd: repoPath, encoding: 'utf8' });
+						if (upstreamRes.status === 0 && upstreamRes.stdout.trim()) {
+							upstreamBranch = upstreamRes.stdout.trim();
+						}
+					} catch (e) {}
+
+					let logRes;
+					if (upstreamBranch) {
+						logRes = spawnSync('git', ['log', `${upstreamBranch}..${branchName}`, '--pretty=format:%h|||%at|||%s'], { cwd: repoPath, encoding: 'utf8' });
+					} else {
+						logRes = spawnSync('git', ['log', branchName, '--not', '--remotes', '--pretty=format:%h|||%at|||%s'], { cwd: repoPath, encoding: 'utf8' });
+					}
+
+					if (logRes && logRes.status === 0 && logRes.stdout) {
+						const lines = logRes.stdout
+							.split('\n')
+							.map(l => l.trim())
+							.filter(l => l.length > 0);
+						for (const line of lines) {
+							const parts = line.split('|||');
+							if (parts.length >= 3) {
+								const hash = parts[0].trim();
+								const timestamp = parseInt(parts[1].trim(), 10);
+								const message = parts.slice(2).join('|||').trim();
+
+								const existing = unpushedCommits.find(c => c.hash === hash);
+								if (existing) {
+									if (!existing.branches.includes(branchName)) {
+										existing.branches.push(branchName);
+									}
+								} else {
+									unpushedCommits.push({
+										hash,
+										timestamp,
+										message,
+										branches: [branchName]
+									});
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Sort unpushed commits descending by timestamp
+			unpushedCommits.sort((a, b) => b.timestamp - a.timestamp);
+
+			const hasChanges = hasUncommitted || unpushedCommits.length > 0;
+			if (!hasChanges) {
+				console.log(`\x1b[32m${repoName}\x1b[0m`);
+			} else {
+				console.log(`\x1b[33m${repoName}:\x1b[0m`);
+				if (hasUncommitted) {
+					console.log(`  • Uncommited changes`);
+				}
+				for (const commit of unpushedCommits) {
+					const branchesStr = commit.branches.join(', ');
+					console.log(`  • [${branchesStr}] ${commit.message}`);
+				}
+			}
 		}
 
 		process.exit(0);
