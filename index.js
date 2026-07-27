@@ -176,6 +176,21 @@ function pruneHistory(history) {
 	return history;
 }
 
+function sanitizeHistory(history) {
+	if (!Array.isArray(history)) return [];
+	return history.filter(Boolean).map(msg => {
+		if (typeof msg !== 'object') return msg;
+		if (!msg.role) {
+			const hasFunctionResponse = Array.isArray(msg.parts) && msg.parts.some(p => p && p.functionResponse);
+			msg.role = hasFunctionResponse ? 'user' : 'model';
+		}
+		if (!Array.isArray(msg.parts)) {
+			msg.parts = [];
+		}
+		return msg;
+	});
+}
+
 // Helper to run a sub-agent for summarizing massive tool output
 async function runSummarizationSubAgent(originalResult, query) {
 	if (!ai) {
@@ -213,7 +228,7 @@ async function handleBackgroundSummarization(session_path) {
 	let history = [];
 	let L_before = 0;
 	try {
-		history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+		history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 		L_before = history.length;
 	} catch (e) {
 		return;
@@ -259,7 +274,7 @@ async function handleBackgroundSummarization(session_path) {
 		if (summary && fs.existsSync(session_path)) {
 			let currentHistory = [];
 			try {
-				currentHistory = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+				currentHistory = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 			} catch (e) {
 				currentHistory = history;
 			}
@@ -651,7 +666,7 @@ function findSessionModelMessages() {
 
 	for (const sessionFile of sessionFiles) {
 		try {
-			const history = JSON.parse(fs.readFileSync(sessionFile.path, 'utf8'));
+			const history = sanitizeHistory(JSON.parse(fs.readFileSync(sessionFile.path, 'utf8')));
 			if (Array.isArray(history)) {
 				const modelTexts = [];
 				for (const msg of history) {
@@ -4340,7 +4355,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	let history = [];
 	if (!is_initial_pr_review && fs.existsSync(session_path)) {
 		try {
-			history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
+			history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 		} catch (e) {
 			// Clear corrupt file
 		}
@@ -4464,6 +4479,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			if (!model_message) {
 				finishProgressError('No response received from model.');
 				break;
+			}
+
+			if (model_message && !model_message.role) {
+				model_message.role = 'model';
 			}
 
 			// Capture and display Google Search Grounding metadata
