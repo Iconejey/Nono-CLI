@@ -2341,6 +2341,21 @@ async function main() {
 		fs.mkdirSync(cache_dir, { recursive: true });
 	}
 
+	let auto_continue = false;
+	const envAutoContinue = process.env.NONO_AUTO_CONTINUE;
+	if (envAutoContinue) {
+		const lowered = envAutoContinue.trim().toLowerCase();
+		if (lowered === 'true' || lowered === 'yes' || lowered === '1') {
+			auto_continue = true;
+		}
+	}
+
+	const autoContinueIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-ac' || arg === '--auto-continue'));
+	if (autoContinueIdx !== -1) {
+		auto_continue = true;
+		process.argv.splice(autoContinueIdx, 1);
+	}
+
 	// Clean up old nono-pr- directories in tmp (older than 2 hours)
 	try {
 		const files = fs.readdirSync(os.tmpdir());
@@ -2423,6 +2438,7 @@ async function main() {
   nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
   nono --raw                 Print the last final message in raw markdown with syntax highlighting
+  nono --auto-continue, -ac  Auto-send "continue" on "Task completed" up to 3 times (or set NONO_AUTO_CONTINUE=true)
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -4382,6 +4398,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	let pendingSummaryTriggers = [];
 	const grounding_sources = [];
 	const web_search_queries = [];
+	let autoContinueCount = 0;
 	while (true) {
 		try {
 			let response;
@@ -4662,7 +4679,31 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					continue;
 				} else {
 					// No functions to call, we have reached the final state
-					await finishProgress(text_part ? text_part.text : 'Task completed.', grounding_sources);
+					const final_msg = text_part ? text_part.text : 'Task completed.';
+					const isTaskCompletedMsg =
+						final_msg
+							.trim()
+							.toLowerCase()
+							.replace(/[.\s✦•*-]+/g, '') === 'taskcompleted';
+
+					if (auto_continue && isTaskCompletedMsg && autoContinueCount < 3) {
+						autoContinueCount++;
+						await finishProgress(final_msg, grounding_sources);
+						console.log(`\x1b[33mAuto-continuing (${autoContinueCount}/3)... \x1b[0m\n`);
+
+						history.push({
+							role: 'user',
+							parts: [{ text: 'continue' }]
+						});
+
+						pruneHistory(history);
+						fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+
+						start_time = Date.now();
+						continue;
+					}
+
+					await finishProgress(final_msg, grounding_sources);
 					break;
 				}
 			}
