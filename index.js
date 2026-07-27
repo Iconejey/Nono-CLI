@@ -32,7 +32,7 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--last-changes', '--check-changes', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--last-changes', '--check-changes', '--check-branches', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -2447,6 +2447,7 @@ async function main() {
   nono --resume              List and interactively select previous session context to resume
   nono --last-changes        List and interactively select recent commits from the last 14 days
   nono --check-changes       Check for uncommitted changes and unpushed commits in all repositories
+  nono --check-branches      Check the active branch of all repositories in the current directory
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
   nono --commit              Generate commit message suggestions for staged edits and commit
@@ -3169,6 +3170,78 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 					console.log(`  • [${branchesStr}] ${commit.message}`);
 				}
 			}
+		}
+
+		process.exit(0);
+		return;
+	}
+
+	// Handle nono --check-branches command
+	if (process.argv[2] === '--check-branches') {
+		const currentDir = process.cwd();
+		const repos = findGitRepos(currentDir);
+
+		if (repos.length === 0) {
+			console.log('\x1b[31m✦ No git repositories found recursively in the current directory.\x1b[0m');
+			process.exit(0);
+			return;
+		}
+
+		for (const repoPath of repos) {
+			const repoName = path.relative(currentDir, repoPath) || path.basename(repoPath);
+			let branch = 'Unknown';
+			try {
+				const res = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, encoding: 'utf8' });
+				if (res.status === 0 && res.stdout.trim()) {
+					branch = res.stdout.trim();
+				}
+			} catch (e) {}
+
+			let needsPullOrPush = false;
+			try {
+				let upstreamBranch = '';
+				try {
+					const upstreamRes = spawnSync('git', ['rev-parse', '--abbrev-ref', '@{upstream}'], { cwd: repoPath, encoding: 'utf8' });
+					if (upstreamRes.status === 0 && upstreamRes.stdout.trim()) {
+						upstreamBranch = upstreamRes.stdout.trim();
+					}
+				} catch (e) {}
+
+				if (upstreamBranch) {
+					const revListRes = spawnSync('git', ['rev-list', '--left-right', '--count', `HEAD...${upstreamBranch}`], { cwd: repoPath, encoding: 'utf8' });
+					if (revListRes.status === 0) {
+						const counts = revListRes.stdout.trim().split(/\s+/);
+						if (counts.length === 2) {
+							const behind = parseInt(counts[0], 10);
+							const ahead = parseInt(counts[1], 10);
+							if (behind > 0 || ahead > 0) {
+								needsPullOrPush = true;
+							}
+						}
+					}
+				} else {
+					let hasRemotes = false;
+					try {
+						const remoteRes = spawnSync('git', ['remote'], { cwd: repoPath, encoding: 'utf8' });
+						if (remoteRes.status === 0 && remoteRes.stdout.trim().length > 0) {
+							hasRemotes = true;
+						}
+					} catch (e) {}
+
+					if (hasRemotes) {
+						const logRes = spawnSync('git', ['rev-list', 'HEAD', '--not', '--remotes', '--count'], { cwd: repoPath, encoding: 'utf8' });
+						if (logRes.status === 0) {
+							const aheadCount = parseInt(logRes.stdout.trim(), 10);
+							if (aheadCount > 0) {
+								needsPullOrPush = true;
+							}
+						}
+					}
+				}
+			} catch (e) {}
+
+			const branchColor = needsPullOrPush ? '\x1b[33m' : '\x1b[37m';
+			console.log(`  \x1b[90m• ${repoName}: ${branchColor}${branch}\x1b[0m`);
 		}
 
 		process.exit(0);
