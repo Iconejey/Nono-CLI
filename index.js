@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { exec, execSync, spawn } from 'child_process';
+import { exec, execSync, spawn, spawnSync } from 'child_process';
 import readline from 'readline';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
@@ -32,7 +32,7 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
+if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--last-changes', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -2415,6 +2415,7 @@ async function main() {
   nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
+  nono --last-changes        List and interactively select recent commits from the last 14 days
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
   nono --commit              Generate commit message suggestions for staged edits and commit
@@ -2832,6 +2833,206 @@ Return ONLY a JSON object. Do not include markdown code block formatting (like \
 		}
 		console.log(`\n\x1b[90m--------------------------------------------------\x1b[0m`);
 		console.log(`\x1b[32mSession context loaded! The next nono command will continue this session.\x1b[0m\n`);
+
+		process.exit(0);
+		return;
+	}
+
+	// Helper to recursively find git repos in a directory (skipping build/dependency/hidden directories)
+	function findGitRepos(dir, repos = []) {
+		try {
+			const files = fs.readdirSync(dir, { withFileTypes: true });
+			let hasGit = false;
+			for (const file of files) {
+				if (file.name === '.git') {
+					hasGit = true;
+					break;
+				}
+			}
+			if (hasGit) {
+				repos.push(dir);
+			}
+
+			for (const file of files) {
+				if (file.isDirectory()) {
+					const name = file.name;
+					if (['.git', 'node_modules', '.cache', '.vscode', '.idea', 'vendor', 'dist', 'build', 'target', 'bin', 'obj'].includes(name)) {
+						continue;
+					}
+					findGitRepos(path.join(dir, name), repos);
+				}
+			}
+		} catch (e) {
+			// Ignore
+		}
+		return repos;
+	}
+
+	// Helper to get git user.name configured for a repo (falls back to global)
+	function getGitUsername(repoPath) {
+		try {
+			const res = spawnSync('git', ['config', 'user.name'], { cwd: repoPath, encoding: 'utf8' });
+			if (res.status === 0 && res.stdout.trim()) {
+				return res.stdout.trim();
+			}
+		} catch (e) {}
+
+		try {
+			const res = spawnSync('git', ['config', '--global', 'user.name'], { encoding: 'utf8' });
+			if (res.status === 0 && res.stdout.trim()) {
+				return res.stdout.trim();
+			}
+		} catch (e) {}
+
+		return '';
+	}
+
+	// Helper to get all branches for a repo
+	function getBranches(repoPath) {
+		try {
+			const res = spawnSync('git', ['branch', '--format=%(refname:short)'], { cwd: repoPath, encoding: 'utf8' });
+			if (res.status === 0) {
+				return res.stdout
+					.split('\n')
+					.map(b => b.trim())
+					.filter(b => b.length > 0);
+			}
+		} catch (e) {}
+		return [];
+	}
+
+	// Handle nono --last-changes command
+	if (process.argv[2] === '--last-changes') {
+		const currentDir = process.cwd();
+		const repos = findGitRepos(currentDir);
+
+		if (repos.length === 0) {
+			console.log('\x1b[31m✦ No git repositories found recursively in the current directory.\x1b[0m');
+			process.exit(0);
+			return;
+		}
+
+		// Initialize daysMap
+		const now = new Date();
+		const getLocalDateString = date => {
+			const y = date.getFullYear();
+			const m = String(date.getMonth() + 1).padStart(2, '0');
+			const d = String(date.getDate()).padStart(2, '0');
+			return `${y}-${m}-${d}`;
+		};
+
+		const daysMap = [];
+		for (let i = 0; i < 14; i++) {
+			const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+			const dateStr = getLocalDateString(d);
+
+			let relativeName = '';
+			if (i === 0) {
+				relativeName = 'Today';
+			} else if (i === 1) {
+				relativeName = 'Yesterday';
+			} else {
+				relativeName = `${i} days ago`;
+			}
+
+			const options = { weekday: 'long', month: 'short', day: 'numeric' };
+			const formattedAbs = d.toLocaleDateString('en-US', options);
+			const displayName = `${relativeName} (${formattedAbs})`;
+
+			daysMap.push({
+				dateStr,
+				displayName,
+				commits: []
+			});
+		}
+
+		// Collect commits
+		for (const repoPath of repos) {
+			const repoName = path.basename(repoPath);
+
+			const username = getGitUsername(repoPath);
+			if (!username) {
+				continue;
+			}
+
+			const branches = getBranches(repoPath);
+			for (const branchName of branches) {
+				// Execute git log for this branch
+				const res = spawnSync('git', ['log', branchName, `--author=${username}`, '--since=14 days ago', '--pretty=format:%h|||%at|||%s'], { cwd: repoPath, encoding: 'utf8' });
+
+				if (res.status === 0 && res.stdout) {
+					const lines = res.stdout.split('\n');
+					for (const line of lines) {
+						const parts = line.split('|||');
+						if (parts.length >= 3) {
+							const hash = parts[0].trim();
+							const timestamp = parseInt(parts[1].trim(), 10);
+							const message = parts.slice(2).join('|||').trim();
+
+							const commitDate = new Date(timestamp * 1000);
+							const commitDateStr = getLocalDateString(commitDate);
+
+							const day = daysMap.find(d => d.dateStr === commitDateStr);
+							if (day) {
+								const existing = day.commits.find(c => c.hash === hash && c.repo === repoName);
+								if (existing) {
+									if (!existing.branches.includes(branchName)) {
+										existing.branches.push(branchName);
+									}
+								} else {
+									day.commits.push({
+										timestamp,
+										repo: repoName,
+										branches: [branchName],
+										message,
+										hash
+									});
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Filter empty days
+		const filteredDays = daysMap.filter(d => d.commits.length > 0);
+
+		if (filteredDays.length === 0) {
+			console.log('\x1b[31m✦ No commits found in the last 14 days.\x1b[0m');
+			process.exit(0);
+			return;
+		}
+
+		const options = filteredDays.map(d => d.displayName);
+
+		let selectedIndex;
+		try {
+			selectedIndex = await chooseOption(options, '\n\x1b[35mSelect a day to view changes:\x1b[0m');
+		} catch (e) {
+			console.error(e);
+			process.exit(1);
+		}
+
+		const selectedDay = filteredDays[selectedIndex];
+
+		// Sort commits descending by timestamp
+		selectedDay.commits.sort((a, b) => b.timestamp - a.timestamp);
+
+		console.log(`\n\x1b[34m\x1b[1mCommits on ${selectedDay.displayName}:\x1b[0m`);
+		for (const commit of selectedDay.commits) {
+			const date = new Date(commit.timestamp * 1000);
+			const hours = String(date.getHours()).padStart(2, '0');
+			const minutes = String(date.getMinutes()).padStart(2, '0');
+			const timeStr = `${hours}:${minutes}`;
+
+			const formattedTime = `\x1b[90m${timeStr}\x1b[0m`;
+			const formattedRepo = `\x1b[32m\x1b[1m${commit.repo}\x1b[0m`;
+			const formattedBranch = `\x1b[35m(${commit.branches.join(', ')})\x1b[0m`;
+			const formattedMsg = commit.message;
+
+			console.log(`${formattedTime} ${formattedRepo} ${formattedBranch}: ${formattedMsg}`);
+		}
 
 		process.exit(0);
 		return;
