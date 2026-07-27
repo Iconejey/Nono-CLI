@@ -4279,15 +4279,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				process.exit(0);
 			}
 			let printedPrompt = user_query.trim();
-			if (isLikelyCode(printedPrompt)) {
-				try {
-					printedPrompt = cliHighlight.highlight(printedPrompt, {
-						ignoreIllegals: true,
-						theme: custom_theme
-					});
-				} catch (e) {
-					printedPrompt = user_query.trim();
-				}
+			try {
+				printedPrompt = cliHighlight.highlight(printedPrompt, {
+					language: 'markdown',
+					ignoreIllegals: true,
+					theme: custom_theme
+				});
+			} catch (e) {
+				printedPrompt = user_query.trim();
 			}
 			console.log(`\x1b[35m>\x1b[0m ${printedPrompt}\n`);
 		} else {
