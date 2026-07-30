@@ -43,7 +43,53 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 // Global Progress & Logging State
 let start_time = Date.now();
 let details_path = '';
-let progress_line_active = false;
+
+let latest_context_size = 0;
+let latest_tok_speed = 0;
+let is_bottom_line_active = false;
+
+const original_stdout_write = process.stdout.write.bind(process.stdout);
+const original_stderr_write = process.stderr.write.bind(process.stderr);
+
+function drawBottomLine() {
+	if (!ai) return;
+	const token_limit = parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+	const current_tokens = latest_context_size || 0;
+	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
+	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
+	const formatted_limit = (token_limit / 1000).toFixed(1) + 'K';
+	const speed_str = latest_tok_speed > 0 ? `${latest_tok_speed} tok/s` : '-- tok/s';
+	const line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+	original_stdout_write('\r\x1b[K' + line);
+	is_bottom_line_active = true;
+}
+
+function clearBottomLine() {
+	if (is_bottom_line_active) {
+		original_stdout_write('\r\x1b[K');
+		is_bottom_line_active = false;
+	}
+}
+
+process.stdout.write = function (chunk, encoding, callback) {
+	const was_active = is_bottom_line_active;
+	if (was_active) clearBottomLine();
+
+	const result = original_stdout_write(chunk, encoding, callback);
+	if (was_active) drawBottomLine();
+
+	return result;
+};
+
+process.stderr.write = function (chunk, encoding, callback) {
+	const was_active = is_bottom_line_active;
+	if (was_active) clearBottomLine();
+
+	const result = original_stderr_write(chunk, encoding, callback);
+	if (was_active) drawBottomLine();
+
+	return result;
+};
 
 // Strip ANSI visual escape codes
 function stripAnsi(str) {
@@ -763,16 +809,12 @@ async function highlightRawMarkdown(md) {
 }
 
 function updateProgress(raw_text, color) {
-	if (progress_line_active) {
-		process.stdout.write('\n');
-		progress_line_active = false;
-	}
 	const line = formatProgressLine(raw_text, color);
 	console.log(line);
 }
 
 function clearProgress() {
-	// No-op since we don't roll/clear progress lines anymore
+	clearBottomLine();
 }
 
 function formatElapsedTime(seconds) {
@@ -4171,7 +4213,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 			const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
 
-			const token_limit = process.env.NONO_SUMMARIZE_TOKEN_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) : 20000;
+			const token_limit = parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
 
 			if (total_tokens > token_limit && user_turns >= 3) {
 				console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
@@ -4208,6 +4250,18 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		console.log('\x1b[90m✦ Starting analysis...\x1b[0m');
 	}
 
+	// Count tokens of initial history
+	if (ai) {
+		try {
+			const token_count_res = await ai.models.countTokens({
+				model: model_name,
+				contents: history
+			});
+			latest_context_size = token_count_res.totalTokens || 0;
+		} catch (e) {}
+	}
+	drawBottomLine();
+
 	// Start the ReAct execution loop
 	let pendingSummaryTriggers = [];
 	const grounding_sources = [];
@@ -4220,6 +4274,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			const maxAttempts = 3;
 			while (true) {
 				try {
+					const start_api_time = Date.now();
 					response = await ai.models.generateContent({
 						model: model_name,
 						contents: history,
@@ -4241,6 +4296,13 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							}
 						}
 					});
+					const duration_ms = Date.now() - start_api_time;
+					if (response && response.usageMetadata) {
+						const cand_tokens = response.usageMetadata.candidatesTokenCount || 0;
+						latest_tok_speed = duration_ms > 0 ? Math.round(cand_tokens / (duration_ms / 1000)) : 0;
+						latest_context_size = response.usageMetadata.totalTokenCount || response.usageMetadata.promptTokenCount + response.usageMetadata.candidatesTokenCount || 0;
+						drawBottomLine();
+					}
 					break;
 				} catch (apiErr) {
 					attempts++;
@@ -4532,15 +4594,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				const call = call_part.functionCall;
 				const { name, args, id } = call;
 
-				// Formulate a clean progress line for the tool call
-				let printedProgress = false;
-				if (name !== 'write_file' && name !== 'patch_file') {
-					const tool_progress = formatToolCallProgress(name, args);
-					const progressLine = formatProgressLine(`• ${tool_progress}`);
-					process.stdout.write(progressLine);
-					printedProgress = true;
-					progress_line_active = true;
-				}
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
 				const tool_fn = tools_mapping[name];
@@ -4572,15 +4625,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					};
 				}
 
-				if (printedProgress) {
-					if (progress_line_active) {
-						if (isSummarized) {
-							process.stdout.write('\x1b[90m [sum]\x1b[0m\n');
-						} else {
-							process.stdout.write('\n');
-						}
-						progress_line_active = false;
-					}
+				if (name !== 'write_file' && name !== 'patch_file') {
+					const tool_progress = formatToolCallProgress(name, args);
+					const suffix = isSummarized ? ' \x1b[90m[sum]\x1b[0m' : '';
+					const progressLine = formatProgressLine(`• ${tool_progress}${suffix}`);
+					console.log(progressLine);
 				}
 
 				const function_response_part = {
