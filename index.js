@@ -16,12 +16,12 @@ import * as Diff from 'diff';
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
 process.env.DOTENV_LOG_LEVEL = 'none';
 process.env.DOTENVX_LOG_LEVEL = 'none';
-dotenv.config({ path: path.join(dir_name, '.env'), quiet: true });
+dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
 dotenv.config({
 	path: path.join(os.homedir(), '.config', 'nono', '.env'),
 	quiet: true
 });
-dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true });
+dotenv.config({ path: path.join(dir_name, '.env'), quiet: true });
 
 const api_key = process.env.GEMINI_API_KEY;
 const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
