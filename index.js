@@ -4456,10 +4456,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						if (isAutoMode) {
 							lastIssueJson = null;
 							const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
+							const commentBody = cleanText ? `${severityStr}${cleanText}` : `${severityStr}${issueJson.message}`;
 							prComments.push({
 								path: issueJson.file,
 								line: issueJson.line,
-								body: `${severityStr}${issueJson.message}`
+								body: commentBody
 							});
 							history.push({
 								role: 'user',
@@ -4491,10 +4492,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									validChoice = true;
 									lastIssueJson = null;
 									const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
+									const commentBody = cleanText ? `${severityStr}${cleanText}` : `${severityStr}${issueJson.message}`;
 									prComments.push({
 										path: issueJson.file,
 										line: issueJson.line,
-										body: `${severityStr}${issueJson.message}`
+										body: commentBody
 									});
 									history.push({
 										role: 'user',
