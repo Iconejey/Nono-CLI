@@ -31,6 +31,7 @@ if (force_gemini) process.argv.splice(gemini_idx_early, 1);
 
 const vllm_api_key = process.env.VLLM_API_KEY;
 const vllm_base_url = process.env.VLLM_BASE_URL;
+const vllm_stat_url = process.env.VLLM_STAT_URL;
 const has_vllm_env = !!vllm_base_url;
 const use_vllm = has_vllm_env && !force_gemini;
 
@@ -290,20 +291,71 @@ let allow_all_high_impact = false;
 
 let latest_context_size = 0;
 let latest_tok_speed = 0;
+let total_candidates_token_count = 0;
+let total_api_duration_ms = 0;
 let is_bottom_line_active = false;
+let latest_vllm_stats = null;
 
 const original_stdout_write = process.stdout.write.bind(process.stdout);
 const original_stderr_write = process.stderr.write.bind(process.stderr);
 
+function formatK(val) {
+	const k_val = val / 1000;
+	if (k_val % 1 === 0) return k_val.toFixed(0) + 'K';
+	return k_val.toFixed(1) + 'K';
+}
+
+async function fetchVllmStatsLoop() {
+	if (!use_vllm || !vllm_stat_url) return;
+	while (true) {
+		try {
+			const controller = new AbortController();
+			const timeout_id = setTimeout(() => controller.abort(), 2000);
+			const res = await fetch(vllm_stat_url, { signal: controller.signal });
+			clearTimeout(timeout_id);
+			if (res.ok) {
+				latest_vllm_stats = await res.json();
+				if (is_bottom_line_active) drawBottomLine();
+			}
+		} catch (err) {
+			// Silent error to prevent loop crash
+		}
+		await new Promise(resolve => {
+			const timer = setTimeout(resolve, 1000);
+			timer.unref();
+		});
+	}
+}
+
 function drawBottomLine() {
 	if (!ai && !openai) return;
-	const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
-	const current_tokens = latest_context_size || 0;
+	let current_tokens = latest_context_size || 0;
+	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+
+	if (use_vllm && latest_vllm_stats?.vllm) {
+		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total;
+		token_limit = latest_vllm_stats.vllm.max_model_len;
+	}
+
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
-	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
-	const formatted_limit = (token_limit / 1000).toFixed(1) + 'K';
+	const formatted_current = formatK(current_tokens);
+	const formatted_limit = formatK(token_limit);
 	const speed_str = latest_tok_speed > 0 ? `${latest_tok_speed} tok/s` : '-- tok/s';
-	const line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+
+	const parts = [`${formatted_current} / ${formatted_limit} (${pct}%)`, speed_str];
+
+	if (use_vllm && latest_vllm_stats) {
+		if (latest_vllm_stats.cpu) {
+			parts.push(`CPU ${Math.round(latest_vllm_stats.cpu.usage_percentage)}% ${Math.round(latest_vllm_stats.cpu.temperature_celsius)}°C`);
+		}
+		if (latest_vllm_stats.gpus && Array.isArray(latest_vllm_stats.gpus)) {
+			latest_vllm_stats.gpus.forEach(gpu => {
+				parts.push(`GPU${gpu.index} ${Math.round(gpu.usage_percentage)}% ${Math.round(gpu.temperature_celsius)}°C`);
+			});
+		}
+	}
+
+	const line = `\x1b[90m${parts.join(' | ')}\x1b[0m`;
 	original_stdout_write('\r\x1b[K' + line);
 	is_bottom_line_active = true;
 }
@@ -1215,6 +1267,17 @@ async function finishProgress(final_text, grounding_sources) {
 		}
 		console.log();
 	}
+
+	const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+	const current_tokens = latest_context_size || 0;
+	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
+	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
+	const formatted_limit = (token_limit / 1000).toFixed(1) + 'K';
+	const avg_tok_speed = total_api_duration_ms > 0 ? Math.round(total_candidates_token_count / (total_api_duration_ms / 1000)) : 0;
+	const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
+	const line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+	console.log(line);
+	console.log();
 
 	playChime('complete');
 	writeDetails(`\n[Final Message]\n✦ ${final_text.trim()}`);
@@ -2781,6 +2844,9 @@ function logTokenUsage(model, usageMetadata, prompt) {
 // ----------------------------------------------------
 
 async function main() {
+	if (use_vllm && vllm_stat_url) {
+		fetchVllmStatsLoop();
+	}
 	if (use_vllm && openai) {
 		try {
 			const models = await openai.models.list();
@@ -4762,6 +4828,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					if (response && response.usageMetadata) {
 						const cand_tokens = response.usageMetadata.candidatesTokenCount || 0;
 						latest_tok_speed = duration_ms > 0 ? Math.round(cand_tokens / (duration_ms / 1000)) : 0;
+						total_candidates_token_count += cand_tokens;
+						total_api_duration_ms += duration_ms;
 						latest_context_size = response.usageMetadata.totalTokenCount || response.usageMetadata.promptTokenCount + response.usageMetadata.candidatesTokenCount || 0;
 						drawBottomLine();
 					}
