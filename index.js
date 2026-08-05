@@ -43,6 +43,7 @@ const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 // Global Progress & Logging State
 let start_time = Date.now();
 let details_path = '';
+let allow_all_high_impact = false;
 
 let latest_context_size = 0;
 let latest_tok_speed = 0;
@@ -1832,11 +1833,12 @@ function searchGrep({ pattern, directory_path }) {
 }
 
 async function executeSystemCommand({ command, timeout_ms = 30000 }) {
-	if (isHighImpactCommand(command)) {
+	if (isHighImpactCommand(command) && !allow_all_high_impact) {
 		updateProgress(`• High-impact action detected: "${command}"`, 'red');
-		const answer = await askUserInRoll(`Do you want to run this command? [Y/n]: `);
+		const answer = await askUserInRoll(`Do you want to run this command? [Y/n/a]: `);
 		const norm = answer.trim().toLowerCase();
-		if (norm !== '' && norm !== 'y' && norm !== 'yes') {
+		if (norm === 'a' || norm === 'all') allow_all_high_impact = true;
+		else if (norm !== '' && norm !== 'y' && norm !== 'yes') {
 			return {
 				status: 'error',
 				error: 'Execution cancelled by the user.'
