@@ -8,6 +8,7 @@ import { exec, execSync, spawn, spawnSync } from 'child_process';
 import readline from 'readline';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 import cliHighlight from 'cli-highlight';
 import prettier from 'prettier';
 import * as Diff from 'diff';
@@ -23,6 +24,16 @@ dotenv.config({
 });
 dotenv.config({ path: path.join(dir_name, '.env'), quiet: true });
 
+// Detect forceGemini early so we can configure clients accordingly
+const gemini_idx_early = process.argv.indexOf('--gemini');
+const force_gemini = gemini_idx_early !== -1;
+if (force_gemini) process.argv.splice(gemini_idx_early, 1);
+
+const vllm_api_key = process.env.VLLM_API_KEY;
+const vllm_base_url = process.env.VLLM_BASE_URL;
+const has_vllm_env = !!vllm_base_url;
+const use_vllm = has_vllm_env && !force_gemini;
+
 const api_key = process.env.GEMINI_API_KEY;
 const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
@@ -32,13 +43,245 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
+if (!use_vllm && !api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
 }
 
 const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
+
+const openai = use_vllm
+	? new OpenAI({
+			apiKey: vllm_api_key,
+			baseURL: vllm_base_url
+		})
+	: null;
+
+let vllm_model_name = process.env.VLLM_MODEL || '';
+let vllm_max_context = 8192; // default fallback
+
+function convertToOpenAIMessages(history, system_instruction) {
+	const messages = [];
+	if (system_instruction) {
+		messages.push({
+			role: 'system',
+			content: system_instruction
+		});
+	}
+
+	for (const msg of history) {
+		if (!msg) continue;
+		const role = msg.role === 'model' ? 'assistant' : 'user';
+		const parts = msg.parts || [];
+		let text = '';
+		const tool_calls = [];
+		const tool_messages = [];
+
+		for (const part of parts) {
+			if (part.text) text += part.text;
+			if (part.functionCall) {
+				tool_calls.push({
+					id: part.functionCall.id || `call_${Math.random().toString(36).substring(2, 11)}`,
+					type: 'function',
+					function: {
+						name: part.functionCall.name,
+						arguments: JSON.stringify(part.functionCall.args)
+					}
+				});
+			}
+			if (part.functionResponse) {
+				tool_messages.push({
+					role: 'tool',
+					tool_call_id: part.functionResponse.id || `call_${part.functionResponse.name}`,
+					content: JSON.stringify(part.functionResponse.response)
+				});
+			}
+		}
+
+		if (tool_messages.length > 0) {
+			for (const tool_msg of tool_messages) messages.push(tool_msg);
+		} else {
+			const oai_msg = { role };
+			if (text) oai_msg.content = text;
+			if (tool_calls.length > 0) oai_msg.tool_calls = tool_calls;
+			messages.push(oai_msg);
+		}
+	}
+	return messages;
+}
+
+function cleanModelText(text) {
+	if (!text) return '';
+	let cleaned = text;
+
+	if (cleaned.includes('</think>')) {
+		const index = cleaned.indexOf('</think>');
+		cleaned = cleaned.substring(index + 8);
+	}
+	cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '');
+	cleaned = cleaned.replace(/<think>[\s\S]*/gi, '');
+
+	return cleaned;
+}
+
+function parseTextToolCalls(text) {
+	const tool_calls = [];
+	if (!text) return tool_calls;
+
+	const tool_call_regex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+	let match;
+	while ((match = tool_call_regex.exec(text)) !== null) {
+		const content = match[1].trim();
+
+		if (content.startsWith('{')) {
+			try {
+				const parsed = JSON.parse(content);
+				if (parsed.name) {
+					tool_calls.push({
+						name: parsed.name,
+						args: parsed.arguments || parsed.args || {},
+						id: `call_${Math.random().toString(36).substring(2, 11)}`
+					});
+					continue;
+				}
+			} catch (e) {
+				// silent
+			}
+		}
+
+		const function_regex = /<function=([a-zA-Z0-9_-]+)>([\s\S]*?)<\/function>/i;
+		const func_match = content.match(function_regex);
+		if (func_match) {
+			const name = func_match[1];
+			const inner = func_match[2];
+			const args = {};
+
+			const param_regex = /<parameter=([a-zA-Z0-9_-]+)>([\s\S]*?)<\/parameter>/gi;
+			let param_match;
+			while ((param_match = param_regex.exec(inner)) !== null) {
+				const param_name = param_match[1];
+				const param_val = param_match[2].trim();
+				if (param_val === 'true') args[param_name] = true;
+				else if (param_val === 'false') args[param_name] = false;
+				else if (!isNaN(param_val) && param_val !== '') args[param_name] = Number(param_val);
+				else if ((param_val.startsWith('"') && param_val.endsWith('"')) || (param_val.startsWith("'") && param_val.endsWith("'"))) args[param_name] = param_val.slice(1, -1);
+				else args[param_name] = param_val;
+			}
+
+			tool_calls.push({
+				name: name,
+				args: args,
+				id: `call_${Math.random().toString(36).substring(2, 11)}`
+			});
+		}
+	}
+
+	return tool_calls;
+}
+
+function convertToGeminiResponse(choice) {
+	const msg = choice.message;
+	const parts = [];
+	let text = msg.content || '';
+
+	const text_tool_calls = parseTextToolCalls(text);
+	text = cleanModelText(text);
+	text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
+
+	if (text) parts.push({ text: text });
+
+	for (const tc of text_tool_calls) {
+		parts.push({
+			functionCall: {
+				name: tc.name,
+				args: tc.args,
+				id: tc.id
+			}
+		});
+	}
+
+	if (msg.tool_calls && msg.tool_calls.length > 0) {
+		for (const tc of msg.tool_calls) {
+			let args = {};
+			try {
+				args = JSON.parse(tc.function.arguments);
+			} catch (e) {
+				// silent
+			}
+			parts.push({
+				functionCall: {
+					name: tc.function.name,
+					args: args,
+					id: tc.id
+				}
+			});
+		}
+	}
+	return {
+		role: 'model',
+		parts: parts
+	};
+}
+
+function convertGeminiToolsToOpenAI(tools) {
+	function lowercaseTypes(obj) {
+		if (Array.isArray(obj)) return obj.map(lowercaseTypes);
+		if (obj !== null && typeof obj === 'object') {
+			const res = {};
+			for (const key of Object.keys(obj)) {
+				if (key === 'type' && typeof obj[key] === 'string') {
+					res[key] = obj[key].toLowerCase();
+				} else {
+					res[key] = lowercaseTypes(obj[key]);
+				}
+			}
+			return res;
+		}
+		return obj;
+	}
+
+	return tools.map(t => ({
+		type: 'function',
+		function: {
+			name: t.name,
+			description: t.description,
+			parameters: t.parameters ? lowercaseTypes(t.parameters) : undefined
+		}
+	}));
+}
+
+const gemini_web_search_declaration = {
+	name: 'gemini_web_search',
+	description: "Queries Google Search using Gemini's web search API to retrieve up-to-date information, news, and details from the web.",
+	parameters: {
+		type: 'OBJECT',
+		properties: {
+			query: {
+				type: 'STRING',
+				description: 'The search query to perform.'
+			}
+		},
+		required: ['query']
+	}
+};
+
+async function geminiWebSearch({ query }) {
+	if (!ai) return { error: 'Gemini API client not initialized.' };
+	try {
+		const response = await ai.models.generateContent({
+			model: model_name,
+			contents: [{ role: 'user', parts: [{ text: query }] }],
+			config: {
+				tools: [{ googleSearch: {} }]
+			}
+		});
+		const text = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+		return { results: text };
+	} catch (err) {
+		return { error: err.message || String(err) };
+	}
+}
 
 // Global Progress & Logging State
 let start_time = Date.now();
@@ -53,8 +296,8 @@ const original_stdout_write = process.stdout.write.bind(process.stdout);
 const original_stderr_write = process.stderr.write.bind(process.stderr);
 
 function drawBottomLine() {
-	if (!ai) return;
-	const token_limit = parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+	if (!ai && !openai) return;
+	const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
 	const current_tokens = latest_context_size || 0;
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
 	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
@@ -240,8 +483,8 @@ function sanitizeHistory(history) {
 
 // Helper to run a sub-agent for summarizing massive tool output
 async function runSummarizationSubAgent(originalResult, query) {
-	if (!ai) {
-		return 'Error: Gemini AI client not initialized.';
+	if (!ai && !openai) {
+		return 'Error: AI client not initialized.';
 	}
 	try {
 		const resultString = JSON.stringify(originalResult, null, 2);
@@ -257,12 +500,21 @@ ${resultString}
 
 Please return a concise, targeted summary or extraction of the relevant parts that satisfies the main agent's query. Maintain crucial technical details, paths, variables, and line numbers if relevant.`;
 
-		const response = await ai.models.generateContent({
-			model: model_name,
-			contents: [{ role: 'user', parts: [{ text: prompt }] }]
-		});
-
-		const text = response.candidates?.[0]?.content?.parts?.[0]?.text;
+		let text = '';
+		if (use_vllm) {
+			const oai_response = await openai.chat.completions.create({
+				model: vllm_model_name,
+				messages: [{ role: 'user', content: prompt }]
+			});
+			text = oai_response.choices?.[0]?.message?.content || '';
+			text = cleanModelText(text);
+		} else {
+			const response = await ai.models.generateContent({
+				model: model_name,
+				contents: [{ role: 'user', parts: [{ text: prompt }] }]
+			});
+			text = response.candidates?.[0]?.content?.parts?.[0]?.text;
+		}
 		return text || 'Could not summarize the tool output.';
 	} catch (err) {
 		return `Error running summarization sub-agent: ${err.message || err}`;
@@ -312,12 +564,22 @@ async function handleBackgroundSummarization(session_path) {
 	];
 
 	try {
-		const response = await ai.models.generateContent({
-			model: model_name,
-			contents: contents
-		});
+		let summary = '';
+		if (use_vllm) {
+			const oai_response = await openai.chat.completions.create({
+				model: vllm_model_name,
+				messages: convertToOpenAIMessages(historyToSummarize, summaryPrompt)
+			});
+			summary = oai_response.choices?.[0]?.message?.content || '';
+			summary = cleanModelText(summary);
+		} else {
+			const response = await ai.models.generateContent({
+				model: model_name,
+				contents: contents
+			});
+			summary = response.candidates?.[0]?.content?.parts?.[0]?.text;
+		}
 
-		const summary = response.candidates?.[0]?.content?.parts?.[0]?.text;
 		if (summary && fs.existsSync(session_path)) {
 			let currentHistory = [];
 			try {
@@ -2107,7 +2369,8 @@ const tools_mapping = {
 	read_terminal_buffer: readTerminalBuffer,
 	view_file_git_diff: viewFileGitDiff,
 	discard_specific_output: discardSpecificOutput,
-	discard_last_steps: discardLastSteps
+	discard_last_steps: discardLastSteps,
+	gemini_web_search: geminiWebSearch
 };
 
 // Helper to get OS description dynamically
@@ -2518,6 +2781,28 @@ function logTokenUsage(model, usageMetadata, prompt) {
 // ----------------------------------------------------
 
 async function main() {
+	if (use_vllm && openai) {
+		try {
+			const models = await openai.models.list();
+			if (models.data && models.data.length > 0) {
+				if (!vllm_model_name) {
+					vllm_model_name = models.data[0].id;
+				}
+				const matchedModel = models.data.find(m => m.id === vllm_model_name) || models.data[0];
+				if (matchedModel && matchedModel.max_model_len) {
+					vllm_max_context = matchedModel.max_model_len;
+				}
+			}
+		} catch (e) {
+			// silent fallback
+		}
+		if (!vllm_model_name) vllm_model_name = 'default-model';
+	} else {
+		if (process.argv[2] !== '--summarize-background' && !['--details', '--usage', '--help', '-h', '--clear', '--resume', '--list-instructions', '--add-instructions', '--get-pricing'].includes(process.argv[2])) {
+			console.warn('\x1b[33mWarning: The Gemini API will be used for the current task.\x1b[0m');
+		}
+	}
+
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
 	if (!fs.existsSync(cache_dir)) {
 		fs.mkdirSync(cache_dir, { recursive: true });
@@ -2615,6 +2900,7 @@ async function main() {
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
   nono --commit              Generate commit message suggestions for staged edits and commit
+  nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --details             Open the logs and details of the current session in VS Code
   nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
@@ -3087,12 +3373,21 @@ feat: implement payment gateway integration
 refactor: streamline user authentication middleware
 fix: resolve null pointer exception in checkout flow`;
 
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: [{ role: 'user', parts: [{ text: prompt }] }]
-			});
-
-			const text = response.text || '';
+			let text = '';
+			if (use_vllm) {
+				const oai_response = await openai.chat.completions.create({
+					model: vllm_model_name,
+					messages: [{ role: 'user', content: prompt }]
+				});
+				text = oai_response.choices?.[0]?.message?.content || '';
+				text = cleanModelText(text);
+			} else {
+				const response = await ai.models.generateContent({
+					model: model_name,
+					contents: [{ role: 'user', parts: [{ text: prompt }] }]
+				});
+				text = response.text || '';
+			}
 			const suggestions = text
 				.split('\n')
 				.map(line => line.replace(/^[\s-*•\d.]+\s*/, '').trim())
@@ -4328,17 +4623,22 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	}
 
 	// Compress history if needed at the start of a new task
-	if (history.length > 0 && ai) {
+	if (history.length > 0 && (ai || openai)) {
 		try {
-			const token_count_res = await ai.models.countTokens({
-				model: model_name,
-				contents: history
-			});
-			const total_tokens = token_count_res.totalTokens || 0;
+			let total_tokens = 0;
+			if (use_vllm) {
+				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+			} else {
+				const token_count_res = await ai.models.countTokens({
+					model: model_name,
+					contents: history
+				});
+				total_tokens = token_count_res.totalTokens || 0;
+			}
 
 			const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
 
-			const token_limit = parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+			const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
 
 			if (total_tokens > token_limit && user_turns >= 3) {
 				console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
@@ -4376,7 +4676,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	}
 
 	// Count tokens of initial history
-	if (ai) {
+	if (use_vllm) {
+		latest_context_size = Math.round(JSON.stringify(history).length / 3.7);
+	} else if (ai) {
 		try {
 			const token_count_res = await ai.models.countTokens({
 				model: model_name,
@@ -4400,27 +4702,62 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			while (true) {
 				try {
 					const start_api_time = Date.now();
-					response = await ai.models.generateContent({
-						model: model_name,
-						contents: history,
-						config: {
-							systemInstruction: is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt,
-							tools: [
+					if (use_vllm) {
+						const systemInstruction = is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt;
+						const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
+						const base_tools = is_initial_pr_review
+							? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+							: tools_declarations;
+						const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
+						const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
+
+						const oai_response = await openai.chat.completions.create({
+							model: vllm_model_name,
+							messages: openAIMessages,
+							tools: openAITools,
+							tool_choice: 'auto'
+						});
+
+						const choice = oai_response.choices?.[0];
+						if (!choice) throw new Error('No choice returned from OpenAI completion.');
+
+						response = {
+							candidates: [
 								{
-									functionDeclarations: is_initial_pr_review
-										? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
-										: tools_declarations
-								},
-								{ googleSearch: {} }
+									content: convertToGeminiResponse(choice)
+								}
 							],
-							toolConfig: {
-								functionCallingConfig: {
-									mode: 'AUTO'
-								},
-								includeServerSideToolInvocations: true
+							usageMetadata: oai_response.usage
+								? {
+										candidatesTokenCount: oai_response.usage.completion_tokens,
+										promptTokenCount: oai_response.usage.prompt_tokens,
+										totalTokenCount: oai_response.usage.total_tokens
+									}
+								: null
+						};
+					} else {
+						response = await ai.models.generateContent({
+							model: model_name,
+							contents: history,
+							config: {
+								systemInstruction: is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt,
+								tools: [
+									{
+										functionDeclarations: is_initial_pr_review
+											? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+											: tools_declarations
+									},
+									{ googleSearch: {} }
+								],
+								toolConfig: {
+									functionCallingConfig: {
+										mode: 'AUTO'
+									},
+									includeServerSideToolInvocations: true
+								}
 							}
-						}
-					});
+						});
+					}
 					const duration_ms = Date.now() - start_api_time;
 					if (response && response.usageMetadata) {
 						const cand_tokens = response.usageMetadata.candidatesTokenCount || 0;
@@ -4431,9 +4768,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					break;
 				} catch (apiErr) {
 					attempts++;
-					const errStr = String(apiErr.message || apiErr);
-					const isTransient = errStr.includes('503') || errStr.includes('429') || errStr.includes('UNAVAILABLE') || errStr.includes('service is currently unavailable');
-					if (isTransient && attempts < maxAttempts) {
+					const err_str = String(apiErr.message || apiErr);
+					if (err_str.includes('--enable-auto-tool-choice') || err_str.includes('tool-call-parser') || err_str.includes('tool choice')) {
+						console.error(`\n\x1b[31mError: vLLM server is not configured for tool calling!\x1b[0m`);
+						console.error(`\x1b[33mTo fix this, please restart your vLLM server with these flags:\x1b[0m`);
+						console.error(`\x1b[36m  --enable-auto-tool-choice --tool-call-parser <hermes|llama|mistral>\x1b[0m\n`);
+					}
+					const is_transient = err_str.includes('503') || err_str.includes('429') || err_str.includes('UNAVAILABLE') || err_str.includes('service is currently unavailable');
+					if (is_transient && attempts < maxAttempts) {
 						const delay = Math.pow(2, attempts) * 1000;
 						updateProgress(`• Transient API error encountered (${apiErr.message || apiErr}). Retrying in ${delay / 1000}s (Attempt ${attempts}/${maxAttempts})...`);
 						await new Promise(resolve => setTimeout(resolve, delay));
