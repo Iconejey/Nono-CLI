@@ -1082,6 +1082,7 @@ function playChime(type) {
 
 // Helper to ask the user a question / confirmation
 function askUser(question, play_sound = true) {
+	const was_active = is_bottom_line_active;
 	clearProgress();
 	if (play_sound) playChime('question');
 
@@ -1137,6 +1138,7 @@ function askUser(question, play_sound = true) {
 		});
 		rl.question(question, answer => {
 			rl.close();
+			if (was_active) drawBottomLine();
 			resolve(answer);
 		});
 	});
@@ -1144,6 +1146,9 @@ function askUser(question, play_sound = true) {
 
 // Reusable helper for key-selected choices with chevron selector
 async function chooseOption(options, headerText = null) {
+	const was_active = is_bottom_line_active;
+	clearProgress();
+
 	if (headerText) {
 		console.log(headerText);
 	}
@@ -1204,6 +1209,7 @@ async function chooseOption(options, headerText = null) {
 					}
 					process.stdin.pause();
 					process.stdin.removeListener('keypress', keypressHandler);
+					if (was_active) drawBottomLine();
 					resolve(selectedIndex);
 				}
 			} catch (err) {
@@ -1216,6 +1222,8 @@ async function chooseOption(options, headerText = null) {
 }
 
 function askUserInRoll(question) {
+	const was_active = is_bottom_line_active;
+	clearProgress();
 	playChime('question');
 	const formattedQuestion = formatProgressLine(question);
 	process.stdout.write(formattedQuestion);
@@ -1228,6 +1236,7 @@ function askUserInRoll(question) {
 		});
 		rl.on('line', line => {
 			rl.close();
+			if (was_active) drawBottomLine();
 			resolve(line);
 		});
 	});
@@ -1235,6 +1244,9 @@ function askUserInRoll(question) {
 
 // Helper to run sudo true interactively and capture stdout/stderr in the roll
 function runInteractiveSudo() {
+	const was_active = is_bottom_line_active;
+	clearProgress();
+
 	return new Promise((resolve, reject) => {
 		const child = spawn('sudo', ['true'], {
 			stdio: ['inherit', 'pipe', 'pipe']
@@ -1255,6 +1267,7 @@ function runInteractiveSudo() {
 		});
 
 		child.on('close', code => {
+			if (was_active) drawBottomLine();
 			if (code === 0) {
 				resolve();
 			} else {
