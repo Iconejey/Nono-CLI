@@ -330,7 +330,7 @@ async function fetchVllmStatsLoop() {
 function drawBottomLine() {
 	if (!ai && !openai) return;
 	let current_tokens = latest_context_size || 0;
-	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
 
 	if (use_vllm && latest_vllm_stats?.vllm) {
 		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total;
@@ -606,12 +606,12 @@ async function handleBackgroundSummarization(session_path) {
 	const historyToSummarize = history.slice(0, sliceIndex);
 	const historyToKeep = history.slice(sliceIndex);
 
-	const summaryPrompt = `Extract the key facts from this conversation history. You must retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
+	const summary_prompt = `Extract the key facts from this conversation history. Make sure this summarized context will only contain information that is relevant to the task direction. Anything that is not worth remembering should go. Retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
 	const contents = [
 		...historyToSummarize,
 		{
 			role: 'user',
-			parts: [{ text: summaryPrompt }]
+			parts: [{ text: summary_prompt }]
 		}
 	];
 
@@ -620,7 +620,7 @@ async function handleBackgroundSummarization(session_path) {
 		if (use_vllm) {
 			const oai_response = await openai.chat.completions.create({
 				model: vllm_model_name,
-				messages: convertToOpenAIMessages(historyToSummarize, summaryPrompt)
+				messages: convertToOpenAIMessages(historyToSummarize, summary_prompt)
 			});
 			summary = oai_response.choices?.[0]?.message?.content || '';
 			summary = cleanModelText(summary);
@@ -655,6 +655,41 @@ async function handleBackgroundSummarization(session_path) {
 	} catch (err) {
 		// Ignore / fail silently
 	}
+}
+
+async function ensureContextLimit(history, session_path) {
+	if (!history || history.length === 0 || !(ai || openai)) return;
+	try {
+		let total_tokens = 0;
+		if (use_vllm) {
+			total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+		} else {
+			const token_count_res = await ai.models.countTokens({
+				model: model_name,
+				contents: history
+			});
+			total_tokens = token_count_res.totalTokens || 0;
+		}
+
+		const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
+
+		const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
+
+		if (total_tokens > token_limit && user_turns >= 3) {
+			console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
+			await handleBackgroundSummarization(session_path);
+			const new_history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
+			history.length = 0;
+			history.push(...new_history);
+		}
+	} catch (e) {
+		// Fail silently
+	}
+}
+
+async function pushToHistoryAndCheckLimit(history, item, session_path) {
+	await ensureContextLimit(history, session_path);
+	history.push(item);
 }
 
 function writeDetails(text) {
@@ -1268,7 +1303,7 @@ async function finishProgress(final_text, grounding_sources) {
 		console.log();
 	}
 
-	const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
+	const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
 	const current_tokens = latest_context_size || 0;
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
 	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
@@ -4688,34 +4723,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 	}
 
-	// Compress history if needed at the start of a new task
-	if (history.length > 0 && (ai || openai)) {
-		try {
-			let total_tokens = 0;
-			if (use_vllm) {
-				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
-			} else {
-				const token_count_res = await ai.models.countTokens({
-					model: model_name,
-					contents: history
-				});
-				total_tokens = token_count_res.totalTokens || 0;
-			}
-
-			const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
-
-			const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 20000;
-
-			if (total_tokens > token_limit && user_turns >= 3) {
-				console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
-				await handleBackgroundSummarization(session_path);
-				history = JSON.parse(fs.readFileSync(session_path, 'utf8'));
-			}
-		} catch (e) {
-			// Fail silently
-		}
-	}
-
 	// Ingest environmental context
 	let project_root = is_pr_review ? pr_review_temp_dir : findProjectRoot();
 
@@ -4730,10 +4737,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 	// Add the new user query to the history
 	const full_user_prompt = `${user_query}${context_bonus}`;
-	history.push({
-		role: 'user',
-		parts: [{ text: full_user_prompt }]
-	});
+	await pushToHistoryAndCheckLimit(
+		history,
+		{
+			role: 'user',
+			parts: [{ text: full_user_prompt }]
+		},
+		session_path
+	);
 
 	writeDetails(`[User Query] ${user_query}\n[PPID] ${process.ppid}\n`);
 
@@ -4937,7 +4948,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			// Add model's turn to history
-			history.push(model_message);
+			await pushToHistoryAndCheckLimit(history, model_message, session_path);
 
 			// Print any thoughts/explanations the model outputs in this turn
 			const text_part = model_message.parts?.find(p => p.text);
@@ -5182,10 +5193,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			// Push user/tool execution results back into the conversation history
-			history.push({
-				role: 'user',
-				parts: response_parts
-			});
+			await pushToHistoryAndCheckLimit(
+				history,
+				{
+					role: 'user',
+					parts: response_parts
+				},
+				session_path
+			);
 
 			pruneHistory(history);
 
