@@ -577,38 +577,38 @@ Please return a concise, targeted summary or extraction of the relevant parts th
 async function handleBackgroundSummarization(session_path) {
 	if (!fs.existsSync(session_path)) return;
 	let history = [];
-	let L_before = 0;
+	let l_before = 0;
 	try {
 		history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
-		L_before = history.length;
+		l_before = history.length;
 	} catch (e) {
 		return;
 	}
 
 	if (!Array.isArray(history) || history.length === 0) return;
 
-	// Find the user prompt message indices (where role: 'user' and first part has text)
-	const promptIndices = [];
+	// Find the user prompt message indices (where role: 'user' and first part is not system memory summary)
+	const prompt_indices = [];
 	for (let i = 0; i < history.length; i++) {
 		const msg = history[i];
-		if (msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string') {
-			if (!msg.parts[0].text.startsWith('[System Memory:\n')) {
-				promptIndices.push(i);
-			}
+		if (msg && msg.role === 'user') {
+			const first_part = msg.parts?.[0];
+			if (first_part && typeof first_part.text === 'string' && first_part.text.startsWith('[System Memory:\n')) continue;
+			prompt_indices.push(i);
 		}
 	}
 
 	// We keep the last 2 turns in full (Turn N-1 and Turn N)
-	// So we need at least 3 prompt messages to summarize (promptIndices.length >= 3)
-	if (promptIndices.length < 3) return;
+	// So we need at least 3 prompt messages to summarize (prompt_indices.length >= 3)
+	if (prompt_indices.length < 3) return;
 
-	const sliceIndex = promptIndices[promptIndices.length - 2];
-	const historyToSummarize = history.slice(0, sliceIndex);
-	const historyToKeep = history.slice(sliceIndex);
+	const slice_index = prompt_indices[prompt_indices.length - 2];
+	const history_to_summarize = history.slice(0, slice_index);
+	const history_to_keep = history.slice(slice_index);
 
 	const summary_prompt = `Extract the key facts from this conversation history. Make sure this summarized context will only contain information that is relevant to the task direction. Anything that is not worth remembering should go. Retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
 	const contents = [
-		...historyToSummarize,
+		...history_to_summarize,
 		{
 			role: 'user',
 			parts: [{ text: summary_prompt }]
@@ -620,7 +620,7 @@ async function handleBackgroundSummarization(session_path) {
 		if (use_vllm) {
 			const oai_response = await openai.chat.completions.create({
 				model: vllm_model_name,
-				messages: convertToOpenAIMessages(historyToSummarize, summary_prompt)
+				messages: convertToOpenAIMessages(history_to_summarize, summary_prompt)
 			});
 			summary = oai_response.choices?.[0]?.message?.content || '';
 			summary = cleanModelText(summary);
@@ -633,23 +633,23 @@ async function handleBackgroundSummarization(session_path) {
 		}
 
 		if (summary && fs.existsSync(session_path)) {
-			let currentHistory = [];
+			let current_history = [];
 			try {
-				currentHistory = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
+				current_history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 			} catch (e) {
-				currentHistory = history;
+				current_history = history;
 			}
 
-			if (Array.isArray(currentHistory)) {
-				// Any messages beyond L_before are new messages added since we started
-				const newMessages = currentHistory.slice(L_before);
+			if (Array.isArray(current_history)) {
+				// Any messages beyond l_before are new messages added since we started
+				const new_messages = current_history.slice(l_before);
 
-				const systemMemoryMsg = {
+				const system_memory_msg = {
 					role: 'user',
 					parts: [{ text: `[System Memory:\n${summary.trim()}]` }]
 				};
-				const newHistory = [systemMemoryMsg, ...historyToKeep, ...newMessages];
-				fs.writeFileSync(session_path, JSON.stringify(newHistory, null, 2), 'utf8');
+				const new_history = [system_memory_msg, ...history_to_keep, ...new_messages];
+				fs.writeFileSync(session_path, JSON.stringify(new_history, null, 2), 'utf8');
 			}
 		}
 	} catch (err) {
@@ -671,11 +671,17 @@ async function ensureContextLimit(history, session_path) {
 			total_tokens = token_count_res.totalTokens || 0;
 		}
 
-		const user_turns = history.filter(msg => msg && msg.role === 'user' && Array.isArray(msg.parts) && msg.parts[0] && typeof msg.parts[0].text === 'string' && !msg.parts[0].text.startsWith('[System Memory:\n')).length;
+		const user_turns = history.filter(msg => {
+			if (!msg || msg.role !== 'user') return false;
+			const first_part = msg.parts?.[0];
+			if (first_part && typeof first_part.text === 'string' && first_part.text.startsWith('[System Memory:\n')) return false;
+			return true;
+		}).length;
 
 		const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
+		const threshold = use_vllm ? Math.round(token_limit * 0.9) : token_limit;
 
-		if (total_tokens > token_limit && user_turns >= 3) {
+		if (total_tokens > threshold && user_turns >= 3) {
 			console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
 			await handleBackgroundSummarization(session_path);
 			const new_history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
