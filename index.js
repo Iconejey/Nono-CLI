@@ -327,6 +327,11 @@ async function fetchVllmStatsLoop() {
 	}
 }
 
+let is_talking_active = false;
+let talking_token_count = 0;
+let current_tool_being_called = null;
+let vllm_baseline_generation = 0;
+
 function drawBottomLine() {
 	if (!ai && !openai) return;
 	let current_tokens = latest_context_size || 0;
@@ -335,6 +340,9 @@ function drawBottomLine() {
 	if (use_vllm && latest_vllm_stats?.vllm) {
 		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total;
 		token_limit = latest_vllm_stats.vllm.max_model_len;
+		if (is_talking_active && vllm_baseline_generation > 0 && latest_vllm_stats.vllm.generation_tokens_total !== undefined) {
+			talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
+		}
 	}
 
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
@@ -355,7 +363,14 @@ function drawBottomLine() {
 		}
 	}
 
-	const line = `\x1b[90m${parts.join(' | ')}\x1b[0m`;
+	let suffix = '';
+	if (current_tool_being_called) {
+		suffix = ` - Calling ${current_tool_being_called}`;
+	} else if (is_talking_active && talking_token_count > 0) {
+		suffix = ` - Generating (${talking_token_count} tokens)`;
+	}
+
+	const line = `\x1b[90m${parts.join(' | ')}${suffix}\x1b[0m`;
 	original_stdout_write('\r\x1b[K' + line);
 	is_bottom_line_active = true;
 }
@@ -4794,27 +4809,57 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
 						const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
 
+						is_reasoning_active = false;
+						reasoning_token_count = 0;
+						reasoning_start_time = 0;
+						is_talking_active = true;
+						talking_token_count = 0;
+						vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total || 0;
+						current_tool_being_called = null;
+						stream_has_tool_calls = false;
+						stream_has_newline = false;
+						stream_tool_name = null;
+						drawBottomLine();
+
 						const oai_response = await openai.chat.completions.create({
 							model: vllm_model_name,
 							messages: openAIMessages,
 							tools: openAITools,
-							tool_choice: 'auto'
+							tool_choice: 'auto',
+							stream: false
 						});
 
+						is_talking_active = false;
+						vllm_baseline_generation = 0;
+						drawBottomLine();
+
 						const choice = oai_response.choices?.[0];
-						if (!choice) throw new Error('No choice returned from OpenAI completion.');
+						const usage = oai_response.usage;
+
+						let full_text = choice?.message?.content || '';
+						if (choice?.message?.reasoning_content) {
+							full_text = `<think>${choice.message.reasoning_content}</think>\n${full_text}`;
+						}
+
+						const choice_with_reasoning = {
+							message: {
+								role: 'assistant',
+								content: full_text || null,
+								tool_calls: choice?.message?.tool_calls
+							}
+						};
 
 						response = {
 							candidates: [
 								{
-									content: convertToGeminiResponse(choice)
+									content: convertToGeminiResponse(choice_with_reasoning)
 								}
 							],
-							usageMetadata: oai_response.usage
+							usageMetadata: usage
 								? {
-										candidatesTokenCount: oai_response.usage.completion_tokens,
-										promptTokenCount: oai_response.usage.prompt_tokens,
-										totalTokenCount: oai_response.usage.total_tokens
+										candidatesTokenCount: usage.completion_tokens,
+										promptTokenCount: usage.prompt_tokens,
+										totalTokenCount: usage.total_tokens
 									}
 								: null
 						};
@@ -5148,6 +5193,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				const call = call_part.functionCall;
 				const { name, args, id } = call;
 
+				current_tool_being_called = name;
+				drawBottomLine();
+
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
 				const tool_fn = tools_mapping[name];
@@ -5161,6 +5209,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						result = { error: err.message || String(err) };
 					}
 				}
+
+				current_tool_being_called = null;
+				drawBottomLine();
 
 				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
