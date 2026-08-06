@@ -341,8 +341,8 @@ function drawBottomLine() {
 	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
 
 	if (use_vllm && latest_vllm_stats?.vllm) {
-		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total;
-		token_limit = latest_vllm_stats.vllm.max_model_len;
+		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total || latest_context_size || 0;
+		token_limit = latest_vllm_stats.vllm.max_model_len || token_limit;
 		if (is_talking_active && vllm_baseline_generation > 0 && latest_vllm_stats.vllm.generation_tokens_total !== undefined) {
 			talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
 		}
