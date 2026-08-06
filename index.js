@@ -700,11 +700,23 @@ async function ensureContextLimit(history, session_path) {
 		const threshold = use_vllm ? Math.round(token_limit * 0.9) : token_limit;
 
 		if (total_tokens > threshold && user_turns >= 3) {
-			console.log(`\n\x1b[33mSession history is growing large (${total_tokens} tokens, ${user_turns} turns). Compressing...\x1b[0m`);
+			console.log(`\x1b[90m• Session history is growing large (${total_tokens} tokens). Compressing...\x1b[0m`);
 			await handleBackgroundSummarization(session_path);
 			const new_history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 			history.length = 0;
 			history.push(...new_history);
+
+			let new_total_tokens = 0;
+			if (use_vllm) {
+				new_total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+			} else {
+				const token_count_res = await ai.models.countTokens({
+					model: model_name,
+					contents: history
+				});
+				new_total_tokens = token_count_res.totalTokens || 0;
+			}
+			console.log(`\x1b[90m• Reduced to ${formatK(new_total_tokens)} tokens\x1b[0m`);
 		}
 	} catch (e) {
 		// Fail silently
