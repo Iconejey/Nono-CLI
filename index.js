@@ -123,7 +123,10 @@ function cleanModelText(text) {
 	cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '');
 	cleaned = cleaned.replace(/<think>[\s\S]*/gi, '');
 
-	return cleaned;
+	// Strip dangling tool-calling tags
+	cleaned = cleaned.replace(/<\/?(tool_call|function|parameter)(=[a-zA-Z0-9_-]+)?>/gi, '');
+
+	return cleaned.trim();
 }
 
 function parseTextToolCalls(text) {
@@ -857,6 +860,9 @@ function formatToolCallProgress(name, args) {
 		case 'view_file_git_diff': {
 			return `Viewing git diff for ${basename}`;
 		}
+		case 'gemini_web_search': {
+			return `Searching the web for "${args.query}"`;
+		}
 		case 'discard_specific_output': {
 			return `Discarding output for "${args.target}"`;
 		}
@@ -1311,7 +1317,7 @@ async function finishProgress(final_text, grounding_sources) {
 	clearProgress();
 	const elapsed = Math.round((Date.now() - start_time) / 1000);
 	console.log(`\x1b[90m• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
-	const formatted = await formatMarkdownForTerminal(final_text.trim());
+	const formatted = await formatMarkdownForTerminal(cleanModelText(final_text).trim());
 	console.log();
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
 	console.log();
@@ -4809,16 +4815,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
 						const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
 
-						is_reasoning_active = false;
-						reasoning_token_count = 0;
-						reasoning_start_time = 0;
 						is_talking_active = true;
 						talking_token_count = 0;
 						vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total || 0;
 						current_tool_being_called = null;
-						stream_has_tool_calls = false;
-						stream_has_newline = false;
-						stream_tool_name = null;
 						drawBottomLine();
 
 						const oai_response = await openai.chat.completions.create({
