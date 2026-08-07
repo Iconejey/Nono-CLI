@@ -5750,7 +5750,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
                   : system_prompt,
                 tools: [
                   {
-                    functionDeclarations: is_initial_pr_review
+                    functionDeclarations: (is_initial_pr_review
                       ? tools_declarations
                           .filter((tool) =>
                             [
@@ -5761,15 +5761,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
                             ].includes(tool.name),
                           )
                           .concat([view_file_git_diff_declaration])
-                      : tools_declarations,
+                      : tools_declarations
+                    ).concat([gemini_web_search_declaration]),
                   },
-                  { googleSearch: {} },
                 ],
                 toolConfig: {
                   functionCallingConfig: {
                     mode: "AUTO",
                   },
-                  includeServerSideToolInvocations: true,
                 },
               },
             });
@@ -5940,7 +5939,9 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
       // Print any thoughts/explanations the model outputs in this turn
       const text_part = model_message.parts?.find((p) => p.text);
-      const function_calls = model_message.parts?.filter((p) => p.functionCall);
+      const function_calls = model_message.parts?.filter(
+        (p) => p.functionCall && tools_mapping[p.functionCall.name],
+      );
       const has_function_calls = function_calls && function_calls.length > 0;
 
       if (text_part && text_part.text) {
