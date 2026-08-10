@@ -2862,14 +2862,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 			let printedPrompt = user_query.trim();
 			try {
-				printedPrompt = cliHighlight.highlight(printedPrompt, {
-					language: 'markdown',
-					ignoreIllegals: true,
-					theme: custom_theme
-				});
-			} catch (e) {
-				printedPrompt = user_query.trim();
-			}
+				printedPrompt = await formatMarkdownForTerminal(printedPrompt);
+			} catch (e) {}
 			console.log(`\x1b[35m>\x1b[0m ${printedPrompt}\n`);
 		} else {
 			user_query = process.argv.slice(2).join(' ');
