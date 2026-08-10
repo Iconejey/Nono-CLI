@@ -69,12 +69,47 @@ if (!use_vllm && !api_key && !['--details', '--usage', '--help', '-h', '--summar
 
 const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
 
+let latestRawResponseErrorBody = null;
+
 const openai = use_vllm
 	? new OpenAI({
 			apiKey: vllm_api_key,
-			baseURL: vllm_base_url
+			baseURL: vllm_base_url,
+			fetch: async (url, options) => {
+				const res = await globalThis.fetch(url, options);
+				if (!res.ok) {
+					const cloned = res.clone();
+					try {
+						latestRawResponseErrorBody = await cloned.text();
+					} catch (e) {
+						latestRawResponseErrorBody = null;
+					}
+				} else {
+					latestRawResponseErrorBody = null;
+				}
+				return res;
+			}
 		})
-	: null;
+	: api_key
+		? new OpenAI({
+				apiKey: api_key,
+				baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+				fetch: async (url, options) => {
+					const res = await globalThis.fetch(url, options);
+					if (!res.ok) {
+						const cloned = res.clone();
+						try {
+							latestRawResponseErrorBody = await cloned.text();
+						} catch (e) {
+							latestRawResponseErrorBody = null;
+						}
+					} else {
+						latestRawResponseErrorBody = null;
+					}
+					return res;
+				}
+			})
+		: null;
 
 let vllm_model_name = process.env.VLLM_MODEL || '';
 let vllm_max_context = 8192; // default fallback
@@ -237,7 +272,7 @@ process.stderr.write = function (chunk, encoding, callback) {
 
 // Helper to run a sub-agent for summarizing massive tool output
 async function runSummarizationSubAgent(originalResult, query) {
-	if (!ai && !openai) {
+	if (!openai) {
 		return 'Error: AI client not initialized.';
 	}
 	try {
@@ -254,21 +289,12 @@ ${resultString}
 
 Please return a concise, targeted summary or extraction of the relevant parts that satisfies the main agent's query. Maintain crucial technical details, paths, variables, and line numbers if relevant.`;
 
-		let text = '';
-		if (use_vllm) {
-			const oai_response = await openai.chat.completions.create({
-				model: vllm_model_name,
-				messages: [{ role: 'user', content: prompt }]
-			});
-			text = oai_response.choices?.[0]?.message?.content || '';
-			text = cleanModelText(text);
-		} else {
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: [{ role: 'user', parts: [{ text: prompt }] }]
-			});
-			text = response.candidates?.[0]?.content?.parts?.[0]?.text;
-		}
+		const oai_response = await openai.chat.completions.create({
+			model: use_vllm ? vllm_model_name : model_name,
+			messages: [{ role: 'user', content: prompt }]
+		});
+		let text = oai_response.choices?.[0]?.message?.content || '';
+		text = cleanModelText(text);
 		return text || 'Could not summarize the tool output.';
 	} catch (err) {
 		return `Error running summarization sub-agent: ${err.message || err}`;
@@ -289,13 +315,13 @@ async function handleBackgroundSummarization(session_path) {
 
 	if (!Array.isArray(history) || history.length === 0) return;
 
-	// Find the user prompt message indices (where role: 'user' and first part is not system memory summary)
+	// Find the user prompt message indices (where role: 'user' and content is not system memory summary)
 	const prompt_indices = [];
 	for (let i = 0; i < history.length; i++) {
 		const msg = history[i];
 		if (msg && msg.role === 'user') {
-			const first_part = msg.parts?.[0];
-			if (first_part && typeof first_part.text === 'string' && first_part.text.startsWith('[System Memory:\n')) continue;
+			const text = typeof msg.content === 'string' ? msg.content : msg.parts?.[0]?.text || '';
+			if (text && text.startsWith('[System Memory:\n')) continue;
 			prompt_indices.push(i);
 		}
 	}
@@ -309,30 +335,15 @@ async function handleBackgroundSummarization(session_path) {
 	const history_to_keep = history.slice(slice_index);
 
 	const summary_prompt = `Extract the key facts from this conversation history. Make sure this summarized context will only contain information that is relevant to the task direction. Anything that is not worth remembering should go. Retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
-	const contents = [
-		...history_to_summarize,
-		{
-			role: 'user',
-			parts: [{ text: summary_prompt }]
-		}
-	];
 
 	try {
-		let summary = '';
-		if (use_vllm) {
-			const oai_response = await openai.chat.completions.create({
-				model: vllm_model_name,
-				messages: convertToOpenAIMessages(history_to_summarize, summary_prompt)
-			});
-			summary = oai_response.choices?.[0]?.message?.content || '';
-			summary = cleanModelText(summary);
-		} else {
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: contents
-			});
-			summary = response.candidates?.[0]?.content?.parts?.[0]?.text;
-		}
+		const openAIMessages = convertToOpenAIMessages(history_to_summarize, summary_prompt);
+		const oai_response = await openai.chat.completions.create({
+			model: use_vllm ? vllm_model_name : model_name,
+			messages: openAIMessages
+		});
+		let summary = oai_response.choices?.[0]?.message?.content || '';
+		summary = cleanModelText(summary);
 
 		if (summary && fs.existsSync(session_path)) {
 			let current_history = [];
@@ -348,7 +359,7 @@ async function handleBackgroundSummarization(session_path) {
 
 				const system_memory_msg = {
 					role: 'user',
-					parts: [{ text: `[System Memory:\n${summary.trim()}]` }]
+					content: `[System Memory:\n${summary.trim()}]`
 				};
 				const new_history = [system_memory_msg, ...history_to_keep, ...new_messages];
 				fs.writeFileSync(session_path, JSON.stringify(new_history, null, 2), 'utf8');
@@ -2942,7 +2953,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		history,
 		{
 			role: 'user',
-			parts: [{ text: full_user_prompt }]
+			content: full_user_prompt
 		},
 		session_path
 	);
@@ -2974,147 +2985,134 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	let autoContinueCount = 0;
 	while (true) {
 		try {
-			let response;
+			let model_message;
 			let attempts = 0;
 			const maxAttempts = 3;
 			while (true) {
 				try {
 					const start_api_time = Date.now();
-					if (use_vllm) {
-						const systemInstruction = is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt;
-						const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
-						const base_tools = is_initial_pr_review
-							? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
-							: tools_declarations;
-						const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
-						const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
+					const systemInstruction = is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt;
+					const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
+					const base_tools = is_initial_pr_review
+						? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+						: tools_declarations;
+					const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
+					const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
 
-						is_talking_active = true;
-						talking_token_count = 0;
-						latest_tok_speed = 0;
-						vllm_start_time = Date.now();
-						vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total !== undefined ? latest_vllm_stats.vllm.generation_tokens_total : null;
-						current_tool_being_called = null;
-						drawBottomLine();
+					is_talking_active = true;
+					talking_token_count = 0;
+					latest_tok_speed = 0;
+					vllm_start_time = Date.now();
+					vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total !== undefined ? latest_vllm_stats.vllm.generation_tokens_total : null;
+					current_tool_being_called = null;
+					drawBottomLine();
 
-						const oai_response = await openai.chat.completions.create({
-							model: vllm_model_name,
-							messages: openAIMessages,
-							tools: openAITools,
-							tool_choice: 'auto',
-							stream: false
-						});
+					latestRawResponseErrorBody = null;
+					const oai_response = await openai.chat.completions.create({
+						model: use_vllm ? vllm_model_name : model_name,
+						messages: openAIMessages,
+						tools: openAITools,
+						tool_choice: 'auto',
+						stream: false
+					});
 
-						is_talking_active = false;
-						vllm_baseline_generation = null;
-						vllm_start_time = null;
-						drawBottomLine();
+					is_talking_active = false;
+					vllm_baseline_generation = null;
+					vllm_start_time = null;
+					drawBottomLine();
 
-						const choice = oai_response.choices?.[0];
-						const usage = oai_response.usage;
+					const choice = oai_response.choices?.[0];
+					const usage = oai_response.usage;
 
-						let content_text = (choice?.message?.content || '').trim();
+					let content_text = (choice?.message?.content || '').trim();
 
-						// Strip dangling/leftover characters at the start of content
-						if (content_text.startsWith('</think>')) {
-							content_text = content_text.substring(8).trim();
-						}
-						if (content_text.startsWith(')') || content_text.startsWith('}')) {
-							content_text = content_text.substring(1).trim();
-						}
-						if (content_text.startsWith('</think>')) {
-							content_text = content_text.substring(8).trim();
-						}
-
-						// Clean up dangling parenthesis/braces/malformed tags before <tool_call>
-						content_text = content_text.replace(/[\r\n]\s*[)}]\s*(?=[\r\n]\s*<tool_call>)/gi, '\n');
-						content_text = content_text.replace(/<tool_call>\s*[)}]\s*(?=[\r\n]\s*<tool_call>)/gi, '');
-
-						let reasoning = (choice?.message?.reasoning_content || '').trim();
-						let full_text = content_text;
-
-						if (reasoning) {
-							full_text = `<think>${reasoning}</think>\n${full_text}`;
-						} else {
-							// If no reasoning_content, check if content_text has a dangling closing tag
-							if (full_text.includes('</think>') && !full_text.includes('<think>')) {
-								full_text = `<think>${full_text}`;
-							}
-						}
-
-						if (verbose && full_text) {
-							console.log(`\x1b[90m${full_text}\x1b[0m\n`);
-						}
-
-						const choice_with_reasoning = {
-							message: {
-								role: 'assistant',
-								content: full_text || null,
-								tool_calls: choice?.message?.tool_calls
-							}
-						};
-
-						response = {
-							candidates: [
-								{
-									content: convertToGeminiResponse(choice_with_reasoning)
-								}
-							],
-							usageMetadata: usage
-								? {
-										candidatesTokenCount: usage.completion_tokens,
-										promptTokenCount: usage.prompt_tokens,
-										totalTokenCount: usage.total_tokens
-									}
-								: null
-						};
-					} else {
-						response = await ai.models.generateContent({
-							model: model_name,
-							contents: history,
-							config: {
-								systemInstruction: is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt,
-								tools: [
-									{
-										functionDeclarations: (is_initial_pr_review
-											? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
-											: tools_declarations
-										).concat([gemini_web_search_declaration])
-									}
-								],
-								toolConfig: {
-									functionCallingConfig: {
-										mode: 'AUTO'
-									}
-								}
-							}
-						});
+					// Strip dangling/leftover characters at the start of content
+					if (content_text.startsWith('</think>')) {
+						content_text = content_text.substring(8).trim();
 					}
+					if (content_text.startsWith(')') || content_text.startsWith('}')) {
+						content_text = content_text.substring(1).trim();
+					}
+					if (content_text.startsWith('</think>')) {
+						content_text = content_text.substring(8).trim();
+					}
+
+					// Clean up dangling parenthesis/braces/malformed tags before <tool_call>
+					content_text = content_text.replace(/[\r\n]\s*[)}]\s*(?=[\r\n]\s*<tool_call>)/gi, '\n');
+					content_text = content_text.replace(/<tool_call>\s*[)}]\s*(?=[\r\n]\s*<tool_call>)/gi, '');
+
+					let reasoning = (choice?.message?.reasoning_content || '').trim();
+					let full_text = content_text;
+
+					if (reasoning) {
+						full_text = `<think>${reasoning}</think>\n${full_text}`;
+					} else {
+						// If no reasoning_content, check if content_text has a dangling closing tag
+						if (full_text.includes('</think>') && !full_text.includes('<think>')) {
+							full_text = `<think>${full_text}`;
+						}
+					}
+
+					if (verbose && full_text) {
+						console.log(`\x1b[90m${full_text}\x1b[0m\n`);
+					}
+
+					model_message = {
+						role: 'assistant',
+						content: full_text || null,
+						tool_calls: choice?.message?.tool_calls || undefined
+					};
+
 					const duration_ms = Date.now() - start_api_time;
-					if (response && response.usageMetadata) {
-						const cand_tokens = response.usageMetadata.candidatesTokenCount || 0;
+					if (usage) {
+						const cand_tokens = usage.completion_tokens || 0;
 						latest_tok_speed = duration_ms > 0 ? Math.round(cand_tokens / (duration_ms / 1000)) : 0;
 						total_candidates_token_count += cand_tokens;
 						total_api_duration_ms += duration_ms;
 
-						if (!use_vllm) {
-							const prompt_tokens = response.usageMetadata.promptTokenCount || 0;
-							const total_tokens = response.usageMetadata.totalTokenCount || prompt_tokens + cand_tokens;
-							if (api_static_overhead === null) {
-								const history_before = latest_context_size || 0;
-								api_static_overhead = Math.max(0, prompt_tokens - history_before);
-							}
-							latest_context_size = Math.max(0, total_tokens - api_static_overhead);
-						} else {
-							latest_context_size = response.usageMetadata.totalTokenCount || response.usageMetadata.promptTokenCount + response.usageMetadata.candidatesTokenCount || 0;
-						}
-
+						latest_context_size = usage.total_tokens || usage.prompt_tokens + cand_tokens || 0;
 						drawBottomLine();
+
+						let currentPrompt = user_query;
+						if (!currentPrompt) {
+							for (let i = history.length - 1; i >= 0; i--) {
+								if (history[i].role === 'user') {
+									const text = typeof history[i].content === 'string' ? history[i].content : history[i].parts?.[0]?.text || '';
+									if (text) {
+										currentPrompt = text;
+										break;
+									}
+								}
+							}
+						}
+						const cleanPromptText = (currentPrompt || '').split('\n\n[')[0].split('\n[')[0].trim();
+						logTokenUsage(
+							use_vllm ? vllm_model_name : model_name,
+							{
+								candidatesTokenCount: usage.completion_tokens,
+								promptTokenCount: usage.prompt_tokens,
+								totalTokenCount: usage.total_tokens
+							},
+							cleanPromptText
+						);
 					}
 					break;
 				} catch (apiErr) {
 					attempts++;
 					const err_str = String(apiErr.message || apiErr);
+					if (verbose || err_str.includes('400') || err_str.includes('BadRequestError')) {
+						console.error(`\n\x1b[31m[Diagnostic] API Request failed:\x1b[0m`, apiErr);
+						if (latestRawResponseErrorBody) {
+							console.error(`\x1b[31m[Diagnostic] Raw API Response Body:\x1b[0m`, latestRawResponseErrorBody);
+						} else if (apiErr.response) {
+							try {
+								const bodyText = await apiErr.response.text();
+								console.error(`\x1b[31m[Diagnostic] Raw API Response Body:\x1b[0m`, bodyText);
+							} catch (e) {
+								console.error(`\x1b[31m[Diagnostic] Failed to read raw response body:\x1b[0m`, e.message);
+							}
+						}
+					}
 					if (err_str.includes('--enable-auto-tool-choice') || err_str.includes('tool-call-parser') || err_str.includes('tool choice')) {
 						console.error(`\n\x1b[31mError: vLLM server is not configured for tool calling!\x1b[0m`);
 						console.error(`\x1b[33mTo fix this, please restart your vLLM server with these flags:\x1b[0m`);
@@ -3131,36 +3129,13 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			if (response.usageMetadata) {
-				let currentPrompt = user_query;
-				if (!currentPrompt) {
-					for (let i = history.length - 1; i >= 0; i--) {
-						if (history[i].role === 'user' && Array.isArray(history[i].parts)) {
-							const textPart = history[i].parts.find(p => p.text);
-							if (textPart && textPart.text) {
-								currentPrompt = textPart.text;
-								break;
-							}
-						}
-					}
-				}
-				const cleanPromptText = (currentPrompt || '').split('\n\n[')[0].split('\n[')[0].trim();
-				logTokenUsage(model_name, response.usageMetadata, cleanPromptText);
-			}
-
-			const candidate = response.candidates?.[0];
-			const model_message = candidate?.content;
 			if (!model_message) {
 				finishProgressError('No response received from model.');
 				break;
 			}
 
-			if (model_message && !model_message.role) {
-				model_message.role = 'model';
-			}
-
 			// Capture and display Google Search Grounding metadata
-			const groundingMetadata = candidate?.groundingMetadata;
+			const groundingMetadata = undefined;
 			if (groundingMetadata) {
 				if (Array.isArray(groundingMetadata.webSearchQueries)) {
 					const queries = groundingMetadata.webSearchQueries.filter(q => typeof q === 'string' && q.trim().length > 0);
@@ -3184,25 +3159,25 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			if (pendingSummaryTriggers.length > 0) {
-				const text_part = model_message.parts?.find(p => p.text);
-				const query = text_part ? text_part.text.trim() : 'relevant details';
+				const text_part = model_message.content;
+				const query = text_part ? text_part.trim() : 'relevant details';
 
 				writeDetails(`\n[Summarizer Trigger] Model specified search query: "${query}"`);
 
-				const last_user_msg = history[history.length - 1];
-				if (last_user_msg && last_user_msg.role === 'user' && Array.isArray(last_user_msg.parts)) {
-					for (const trigger of pendingSummaryTriggers) {
-						const summary = await runSummarizationSubAgent(trigger.originalResult, query);
-						writeDetails(`[Summarizer Trigger] Summary generated for ${trigger.name}:\n${summary}`);
+				for (const trigger of pendingSummaryTriggers) {
+					const summary = await runSummarizationSubAgent(trigger.originalResult, query);
+					writeDetails(`[Summarizer Trigger] Summary generated for ${trigger.name}:\n${summary}`);
 
-						const matching_part = last_user_msg.parts.find(p => p.functionResponse && p.functionResponse.name === trigger.name && (!trigger.callId || p.functionResponse.id === trigger.callId));
-						if (matching_part) {
-							matching_part.functionResponse.response = {
-								status: 'success',
-								summary: summary,
-								is_summarized: true
-							};
-						}
+					const matching_msg = history
+						.slice()
+						.reverse()
+						.find(m => m.role === 'tool' && m.name === trigger.name && (!trigger.callId || m.tool_call_id === trigger.callId));
+					if (matching_msg) {
+						matching_msg.content = JSON.stringify({
+							status: 'success',
+							summary: summary,
+							is_summarized: true
+						});
 					}
 				}
 
@@ -3218,14 +3193,14 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			await pushToHistoryAndCheckLimit(history, model_message, session_path);
 
 			// Print any thoughts/explanations the model outputs in this turn
-			const text_part = model_message.parts?.find(p => p.text);
-			const function_calls = model_message.parts?.filter(p => p.functionCall && tools_mapping[p.functionCall.name]);
-			const has_function_calls = function_calls && function_calls.length > 0;
+			const text_part = model_message.content;
+			const function_calls = model_message.tool_calls || [];
+			const has_function_calls = function_calls.length > 0;
 
-			if (text_part && text_part.text) {
-				writeDetails(`\n[Model Thought]\n${text_part.text.trim()}`);
+			if (text_part) {
+				writeDetails(`\n[Model Thought]\n${text_part.trim()}`);
 				if (has_function_calls) {
-					const thought_summary = getCleanThoughtLine(text_part.text);
+					const thought_summary = getCleanThoughtLine(text_part);
 					if (thought_summary) {
 						updateProgress(`• ${thought_summary}`);
 					}
@@ -3277,11 +3252,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							});
 							history.push({
 								role: 'user',
-								parts: [
-									{
-										text: 'User chose to comment on this issue. Please present the next issue.'
-									}
-								]
+								content: 'User chose to comment on this issue. Please present the next issue.'
 							});
 							console.log(`\x1b[32mAutomatically saved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
 						} else {
@@ -3294,11 +3265,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									lastIssueJson = null;
 									history.push({
 										role: 'user',
-										parts: [
-											{
-												text: 'User chose to skip this issue. Please present the next issue.'
-											}
-										]
+										content: 'User chose to skip this issue. Please present the next issue.'
 									});
 									console.log('\x1b[90mSkipping issue...\x1b[0m\n');
 								} else if (choice === 'c' || choice === 'comment') {
@@ -3313,11 +3280,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									});
 									history.push({
 										role: 'user',
-										parts: [
-											{
-												text: 'User chose to comment on this issue. Please present the next issue.'
-											}
-										]
+										content: 'User chose to comment on this issue. Please present the next issue.'
 									});
 									console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
 								} else if (choice === 'w' || choice === 'write') {
@@ -3325,7 +3288,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 									const promptText = await askUser('Enter your prompt / question: ');
 									history.push({
 										role: 'user',
-										parts: [{ text: promptText }]
+										content: promptText
 									});
 									console.log('\x1b[90mSending prompt to Nono...\x1b[0m\n');
 								} else {
@@ -3339,11 +3302,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							lastIssueJson = null;
 							history.push({
 								role: 'user',
-								parts: [
-									{
-										text: 'Please present the next issue (or state "No more issues" if there are none).'
-									}
-								]
+								content: 'Please present the next issue (or state "No more issues" if there are none).'
 							});
 							console.log('\x1b[90mAutomatically proceeding to next issue...\x1b[0m\n');
 						} else {
@@ -3352,16 +3311,12 @@ Analyze the changed files, trace references in the codebase, and write your fina
 								lastIssueJson = null;
 								history.push({
 									role: 'user',
-									parts: [
-										{
-											text: 'Please present the next issue (or state "No more issues" if there are none).'
-										}
-									]
+									content: 'Please present the next issue (or state "No more issues" if there are none).'
 								});
 							} else {
 								history.push({
 									role: 'user',
-									parts: [{ text: promptText }]
+									content: promptText
 								});
 							}
 						}
@@ -3374,7 +3329,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					continue;
 				} else {
 					// No functions to call, we have reached the final state
-					const final_msg = text_part ? text_part.text : 'Task completed.';
+					const final_msg = text_part || 'Task completed.';
 					const isTaskCompletedMsg =
 						final_msg
 							.trim()
@@ -3388,7 +3343,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 						history.push({
 							role: 'user',
-							parts: [{ text: 'continue' }]
+							content: 'continue'
 						});
 
 						pruneHistory(history);
@@ -3404,10 +3359,19 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
-			const response_parts = [];
-			for (const call_part of function_calls) {
-				const call = call_part.functionCall;
-				const { name, args, id } = call;
+			for (const call of function_calls) {
+				const name = call.function?.name || call.name;
+				const id = call.id;
+				let args;
+				if (typeof call.function?.arguments === 'string') {
+					try {
+						args = JSON.parse(call.function.arguments);
+					} catch (e) {
+						args = call.function.arguments || {};
+					}
+				} else {
+					args = call.function?.arguments || call.arguments || {};
+				}
 
 				current_tool_being_called = name;
 				drawBottomLine();
@@ -3453,32 +3417,23 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					console.log(progressLine);
 				}
 
-				const function_response_part = {
-					functionResponse: {
-						name,
-						response: result
-					}
-				};
-				if (id) {
-					function_response_part.functionResponse.id = id;
-				}
-				response_parts.push(function_response_part);
+				await pushToHistoryAndCheckLimit(
+					history,
+					{
+						role: 'tool',
+						tool_call_id: id,
+						name: name,
+						content: JSON.stringify(result)
+					},
+					session_path
+				);
 			}
 
-			// Push user/tool execution results back into the conversation history
-			await pushToHistoryAndCheckLimit(
-				history,
-				{
-					role: 'user',
-					parts: response_parts
-				},
-				session_path
-			);
-
-			pruneHistory(history);
-
-			// Save intermediate history state
-			fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+			if (has_function_calls) {
+				pruneHistory(history);
+				// Save intermediate history state
+				fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
+			}
 		} catch (err) {
 			finishProgressError(err.message || String(err));
 			break;

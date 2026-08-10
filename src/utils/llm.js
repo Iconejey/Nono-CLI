@@ -7,42 +7,56 @@ export function convertToOpenAIMessages(history, system_instruction) {
 		});
 	}
 
-	for (const msg of history) {
-		if (!msg) continue;
-		const role = msg.role === 'model' ? 'assistant' : 'user';
-		const parts = msg.parts || [];
-		let text = '';
-		const tool_calls = [];
-		const tool_messages = [];
+	const toolCallIdsByModelAndName = {};
 
-		for (const part of parts) {
-			if (part.text) text += part.text;
-			if (part.functionCall) {
-				tool_calls.push({
-					id: part.functionCall.id || `call_${Math.random().toString(36).substring(2, 11)}`,
-					type: 'function',
-					function: {
-						name: part.functionCall.name,
-						arguments: JSON.stringify(part.functionCall.args)
+	if (Array.isArray(history)) {
+		for (const msg of history) {
+			if (!msg) continue;
+			if (msg.parts && Array.isArray(msg.parts)) {
+				const role = msg.role === 'model' ? 'assistant' : msg.role || 'user';
+				let text = '';
+				const tool_calls = [];
+				const tool_messages = [];
+
+				for (const part of msg.parts) {
+					if (part.text) text += part.text;
+					if (part.functionCall) {
+						const name = part.functionCall.name;
+						const id = part.functionCall.id || `call_${Math.random().toString(36).substring(2, 11)}`;
+						toolCallIdsByModelAndName[name] = id;
+						tool_calls.push({
+							id: id,
+							type: 'function',
+							function: {
+								name: name,
+								arguments: JSON.stringify(part.functionCall.args)
+							}
+						});
 					}
-				});
-			}
-			if (part.functionResponse) {
-				tool_messages.push({
-					role: 'tool',
-					tool_call_id: part.functionResponse.id || `call_${part.functionResponse.name}`,
-					content: JSON.stringify(part.functionResponse.response)
-				});
-			}
-		}
+					if (part.functionResponse) {
+						const name = part.functionResponse.name;
+						const id = part.functionResponse.id || toolCallIdsByModelAndName[name] || `call_${name}`;
+						tool_messages.push({
+							role: 'tool',
+							tool_call_id: id,
+							name: name,
+							content: JSON.stringify(part.functionResponse.response)
+						});
+					}
+				}
 
-		if (tool_messages.length > 0) {
-			for (const tool_msg of tool_messages) messages.push(tool_msg);
-		} else {
-			const oai_msg = { role };
-			if (text) oai_msg.content = text;
-			if (tool_calls.length > 0) oai_msg.tool_calls = tool_calls;
-			messages.push(oai_msg);
+				if (tool_messages.length > 0) {
+					for (const tool_msg of tool_messages) messages.push(tool_msg);
+				} else {
+					const oai_msg = { role };
+					if (text) oai_msg.content = text;
+					if (tool_calls.length > 0) oai_msg.tool_calls = tool_calls;
+					messages.push(oai_msg);
+				}
+			} else {
+				// Already standard OpenAI format
+				messages.push(msg);
+			}
 		}
 	}
 	return messages;
@@ -121,47 +135,7 @@ export function parseTextToolCalls(text) {
 }
 
 export function convertToGeminiResponse(choice) {
-	const msg = choice.message;
-	const parts = [];
-	let text = msg.content || '';
-
-	const text_tool_calls = parseTextToolCalls(text);
-	text = cleanModelText(text);
-	text = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
-
-	if (text) parts.push({ text: text });
-
-	for (const tc of text_tool_calls) {
-		parts.push({
-			functionCall: {
-				name: tc.name,
-				args: tc.args,
-				id: tc.id
-			}
-		});
-	}
-
-	if (msg.tool_calls && msg.tool_calls.length > 0) {
-		for (const tc of msg.tool_calls) {
-			let args = {};
-			try {
-				args = JSON.parse(tc.function.arguments);
-			} catch (e) {
-				// silent
-			}
-			parts.push({
-				functionCall: {
-					name: tc.function.name,
-					args: args,
-					id: tc.id
-				}
-			});
-		}
-	}
-	return {
-		role: 'model',
-		parts: parts
-	};
+	return choice.message;
 }
 
 export function convertGeminiToolsToOpenAI(tools) {
@@ -193,57 +167,74 @@ export function convertGeminiToolsToOpenAI(tools) {
 
 export function pruneHistory(history) {
 	if (!Array.isArray(history)) return history;
-	// We prune all messages except the very last one in history
-	for (let i = 0; i < history.length - 1; i++) {
-		const message = history[i];
-		if (message && message.role === 'user' && Array.isArray(message.parts)) {
-			for (const part of message.parts) {
-				if (part && part.functionResponse && part.functionResponse.response) {
-					const response = part.functionResponse.response;
 
-					// Truncate view_file_contents
-					if (part.functionResponse.name === 'view_file_contents' && typeof response.content === 'string') {
-						if (response.content.length > 1000) {
-							response.content = response.content.slice(0, 1000) + '\n[... Content truncated in history pruning ...]';
-							response.is_truncated = true;
-						}
+	for (let i = 0; i < history.length; i++) {
+		const msg = history[i];
+		if (msg && msg.role === 'tool' && typeof msg.content === 'string') {
+			let response;
+			try {
+				response = JSON.parse(msg.content);
+			} catch (e) {
+				continue;
+			}
+
+			if (response && typeof response === 'object') {
+				let modified = false;
+				const tool_name = msg.name;
+
+				// Truncate view_file_contents
+				if (tool_name === 'view_file_contents' && typeof response.content === 'string') {
+					if (response.content.length > 1000) {
+						response.content = response.content.slice(0, 1000) + '\n[... Content truncated in history pruning ...]';
+						response.is_truncated = true;
+						modified = true;
 					}
-					// Truncate search_grep
-					if (part.functionResponse.name === 'search_grep' && typeof response.matches === 'string') {
-						if (response.matches.length > 1000) {
-							response.matches = response.matches.slice(0, 1000) + '\n[... Matches truncated in history pruning ...]';
-							response.is_truncated = true;
-						}
+				}
+				// Truncate search_grep
+				if (tool_name === 'search_grep' && typeof response.matches === 'string') {
+					if (response.matches.length > 1000) {
+						response.matches = response.matches.slice(0, 1000) + '\n[... Matches truncated in history pruning ...]';
+						response.is_truncated = true;
+						modified = true;
 					}
-					// Truncate execute_system_command
-					if (part.functionResponse.name === 'execute_system_command') {
-						if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
-							response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
-							response.stdout_truncated = true;
-						}
-						if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
-							response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
-							response.stderr_truncated = true;
-						}
+				}
+				// Truncate execute_system_command
+				if (tool_name === 'execute_system_command') {
+					if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
+						response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
+						response.stdout_truncated = true;
+						modified = true;
 					}
-					// Truncate run_node_script
-					if (part.functionResponse.name === 'run_node_script') {
-						if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
-							response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
-							response.stdout_truncated = true;
-						}
-						if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
-							response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
-							response.stderr_truncated = true;
-						}
+					if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
+						response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
+						response.stderr_truncated = true;
+						modified = true;
 					}
-					// Truncate view_file_git_diff
-					if (part.functionResponse.name === 'view_file_git_diff' && typeof response.diff === 'string') {
-						if (response.diff.length > 1000) {
-							response.diff = response.diff.slice(0, 1000) + '\n[... Diff truncated in history pruning ...]';
-							response.is_truncated = true;
-						}
+				}
+				// Truncate run_node_script
+				if (tool_name === 'run_node_script') {
+					if (typeof response.stdout === 'string' && response.stdout.length > 1000) {
+						response.stdout = response.stdout.slice(0, 1000) + '\n[... stdout truncated in history pruning ...]';
+						response.stdout_truncated = true;
+						modified = true;
 					}
+					if (typeof response.stderr === 'string' && response.stderr.length > 1000) {
+						response.stderr = response.stderr.slice(0, 1000) + '\n[... stderr truncated in history pruning ...]';
+						response.stderr_truncated = true;
+						modified = true;
+					}
+				}
+				// Truncate view_file_git_diff
+				if (tool_name === 'view_file_git_diff' && typeof response.diff === 'string') {
+					if (response.diff.length > 1000) {
+						response.diff = response.diff.slice(0, 1000) + '\n[... Diff truncated in history pruning ...]';
+						response.is_truncated = true;
+						modified = true;
+					}
+				}
+
+				if (modified) {
+					msg.content = JSON.stringify(response);
 				}
 			}
 		}
@@ -256,11 +247,10 @@ export function sanitizeHistory(history) {
 	return history.filter(Boolean).map(msg => {
 		if (typeof msg !== 'object') return msg;
 		if (!msg.role) {
-			const hasFunctionResponse = Array.isArray(msg.parts) && msg.parts.some(p => p && p.functionResponse);
-			msg.role = hasFunctionResponse ? 'user' : 'model';
+			msg.role = msg.tool_call_id ? 'tool' : 'user';
 		}
-		if (!Array.isArray(msg.parts)) {
-			msg.parts = [];
+		if (msg.role === 'model') {
+			msg.role = 'assistant';
 		}
 		return msg;
 	});

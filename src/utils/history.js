@@ -1,31 +1,27 @@
-export function findCorrespondingCall(history, userMsgIndex, responsePart, partIndex) {
-	const modelMsg = history[userMsgIndex - 1];
-	if (!modelMsg || modelMsg.role !== 'model' || !Array.isArray(modelMsg.parts)) {
-		return null;
+export function findCorrespondingCall(history, toolCallId) {
+	for (let i = history.length - 1; i >= 0; i--) {
+		const msg = history[i];
+		if (msg && msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+			const found = msg.tool_calls.find(tc => tc.id === toolCallId);
+			if (found) return found;
+		}
 	}
-
-	// 1. Try matching by ID if present
-	if (responsePart.functionResponse.id) {
-		const found = modelMsg.parts.find(p => p.functionCall && p.functionCall.id === responsePart.functionResponse.id);
-		if (found) return found.functionCall;
-	}
-
-	// 2. Try matching by same index
-	const modelPart = modelMsg.parts[partIndex];
-	if (modelPart && modelPart.functionCall && modelPart.functionCall.name === responsePart.functionResponse.name) {
-		return modelPart.functionCall;
-	}
-
-	// 3. Fallback: match by name
-	const foundByName = modelMsg.parts.find(p => p.functionCall && p.functionCall.name === responsePart.functionResponse.name);
-	if (foundByName) return foundByName.functionCall;
-
 	return null;
 }
 
-export function matchesTarget(functionCall, target) {
-	if (!functionCall || !functionCall.args) return false;
-	const args = functionCall.args;
+export function matchesTarget(toolCall, target) {
+	if (!toolCall || !toolCall.function || !toolCall.function.arguments) {
+		return false;
+	}
+	let args;
+	try {
+		args = JSON.parse(toolCall.function.arguments);
+	} catch (e) {
+		return false;
+	}
+	if (typeof args !== 'object' || args === null) {
+		return false;
+	}
 	for (const key of Object.keys(args)) {
 		if (typeof args[key] === 'string' && args[key] === target) {
 			return true;
@@ -44,20 +40,15 @@ export function discardSpecificOutput({ target }, history) {
 	let count = 0;
 	for (let i = 0; i < history.length; i++) {
 		const msg = history[i];
-		if (msg.role === 'user' && Array.isArray(msg.parts)) {
-			for (let p = 0; p < msg.parts.length; p++) {
-				const part = msg.parts[p];
-				if (part && part.functionResponse) {
-					const call = findCorrespondingCall(history, i, part, p);
-					if (call && matchesTarget(call, target)) {
-						part.functionResponse.response = {
-							status: 'success',
-							erased: true,
-							message: 'This output has been erased to optimize context window space.'
-						};
-						count++;
-					}
-				}
+		if (msg && msg.role === 'tool' && msg.tool_call_id) {
+			const call = findCorrespondingCall(history, msg.tool_call_id);
+			if (call && matchesTarget(call, target)) {
+				msg.content = JSON.stringify({
+					status: 'success',
+					erased: true,
+					message: 'This output has been erased to optimize context window space.'
+				});
+				count++;
 			}
 		}
 	}
@@ -78,24 +69,16 @@ export function discardLastSteps({ steps_count }, history) {
 	let erased_count = 0;
 	for (let i = history.length - 1; i >= 0; i--) {
 		const msg = history[i];
-		if (msg.role === 'user' && Array.isArray(msg.parts)) {
-			for (let p = msg.parts.length - 1; p >= 0; p--) {
-				const part = msg.parts[p];
-				if (part && part.functionResponse) {
-					part.functionResponse.response = {
-						status: 'success',
-						erased: true,
-						message: 'This output has been erased to optimize context window space.'
-					};
-					erased_count++;
-					if (erased_count >= count) {
-						break;
-					}
-				}
+		if (msg && msg.role === 'tool') {
+			msg.content = JSON.stringify({
+				status: 'success',
+				erased: true,
+				message: 'This output has been erased to optimize context window space.'
+			});
+			erased_count++;
+			if (erased_count >= count) {
+				break;
 			}
-		}
-		if (erased_count >= count) {
-			break;
 		}
 	}
 	return {
