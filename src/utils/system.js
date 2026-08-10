@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { execSync } from 'child_process';
 import { stripAnsi, formatProgressLine } from './terminal.js';
 import { playChime } from './sound.js';
@@ -189,4 +190,50 @@ export function isHighImpactCommand(command) {
 	}
 
 	return false;
+}
+
+export function getOSDescription() {
+	try {
+		if (process.platform === 'linux') {
+			if (fs.existsSync('/etc/os-release')) {
+				const release = fs.readFileSync('/etc/os-release', 'utf8');
+				const name_match = /^PRETTY_NAME="([^"]+)"/m.exec(release) || /^NAME="([^"]+)"/m.exec(release);
+				if (name_match) {
+					return name_match[1];
+				}
+			}
+			return 'Linux';
+		}
+		if (process.platform === 'darwin') {
+			return 'macOS';
+		}
+		if (process.platform === 'win32') {
+			return 'Windows';
+		}
+		return `${os.type()} ${os.release()}`;
+	} catch (e) {
+		return 'Linux';
+	}
+}
+
+export function findNonoFiles(startDir) {
+	const files = [];
+	let currentDir = path.resolve(startDir);
+	while (true) {
+		const filePath = path.join(currentDir, 'nono.md');
+		if (fs.existsSync(filePath)) {
+			try {
+				const stat = fs.statSync(filePath);
+				if (stat.isFile()) {
+					files.push(filePath);
+				}
+			} catch (e) {}
+		}
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) {
+			break;
+		}
+		currentDir = parentDir;
+	}
+	return files;
 }

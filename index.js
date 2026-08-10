@@ -14,11 +14,12 @@ import prettier from 'prettier';
 import * as Diff from 'diff';
 import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
-import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
+import { writeDetails, getDetailsPath, setDetailsPath, logTokenUsage } from './src/utils/logger.js';
 import { loadCustomTheme, custom_theme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, getCleanThoughtLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
 import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
-import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand } from './src/utils/system.js';
+import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
+import { findCorrespondingCall, matchesTarget, discardSpecificOutput, discardLastSteps } from './src/utils/history.js';
 
 import { listDirectoryStructure, viewFileContents, writeFile, patchFile, searchGrep } from './src/tools/fs.js';
 import { getPrettierFlagsFromVSCode, hasProjectPrettierConfig, formatWithPrettier, getLineDiff, getFileDiffText, isIgnoredFile, viewFileGitDiff } from './src/tools/format_diff.js';
@@ -732,112 +733,6 @@ function proposeTerminalInput({ command_to_inject }) {
 	});
 }
 
-function findCorrespondingCall(history, userMsgIndex, responsePart, partIndex) {
-	const modelMsg = history[userMsgIndex - 1];
-	if (!modelMsg || modelMsg.role !== 'model' || !Array.isArray(modelMsg.parts)) {
-		return null;
-	}
-
-	// 1. Try matching by ID if present
-	if (responsePart.functionResponse.id) {
-		const found = modelMsg.parts.find(p => p.functionCall && p.functionCall.id === responsePart.functionResponse.id);
-		if (found) return found.functionCall;
-	}
-
-	// 2. Try matching by same index
-	const modelPart = modelMsg.parts[partIndex];
-	if (modelPart && modelPart.functionCall && modelPart.functionCall.name === responsePart.functionResponse.name) {
-		return modelPart.functionCall;
-	}
-
-	// 3. Fallback: match by name
-	const foundByName = modelMsg.parts.find(p => p.functionCall && p.functionCall.name === responsePart.functionResponse.name);
-	if (foundByName) return foundByName.functionCall;
-
-	return null;
-}
-
-function matchesTarget(functionCall, target) {
-	if (!functionCall || !functionCall.args) return false;
-	const args = functionCall.args;
-	for (const key of Object.keys(args)) {
-		if (typeof args[key] === 'string' && args[key] === target) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function discardSpecificOutput({ target }, history) {
-	if (!Array.isArray(history)) {
-		return { status: 'error', error: 'History is not available.' };
-	}
-	if (typeof target !== 'string' || !target) {
-		return { status: 'error', error: 'Invalid target provided.' };
-	}
-	let count = 0;
-	for (let i = 0; i < history.length; i++) {
-		const msg = history[i];
-		if (msg.role === 'user' && Array.isArray(msg.parts)) {
-			for (let p = 0; p < msg.parts.length; p++) {
-				const part = msg.parts[p];
-				if (part && part.functionResponse) {
-					const call = findCorrespondingCall(history, i, part, p);
-					if (call && matchesTarget(call, target)) {
-						part.functionResponse.response = {
-							status: 'success',
-							erased: true,
-							message: 'This output has been erased to optimize context window space.'
-						};
-						count++;
-					}
-				}
-			}
-		}
-	}
-	return {
-		status: 'success',
-		message: `Successfully erased ${count} tool output(s) matching "${target}".`
-	};
-}
-
-function discardLastSteps({ steps_count }, history) {
-	if (!Array.isArray(history)) {
-		return { status: 'error', error: 'History is not available.' };
-	}
-	const count = parseInt(steps_count, 10);
-	if (isNaN(count) || count <= 0) {
-		return { status: 'error', error: 'Invalid steps_count provided.' };
-	}
-	let erased_count = 0;
-	for (let i = history.length - 1; i >= 0; i--) {
-		const msg = history[i];
-		if (msg.role === 'user' && Array.isArray(msg.parts)) {
-			for (let p = msg.parts.length - 1; p >= 0; p--) {
-				const part = msg.parts[p];
-				if (part && part.functionResponse) {
-					part.functionResponse.response = {
-						status: 'success',
-						erased: true,
-						message: 'This output has been erased to optimize context window space.'
-					};
-					erased_count++;
-					if (erased_count >= count) {
-						break;
-					}
-				}
-			}
-		}
-		if (erased_count >= count) {
-			break;
-		}
-	}
-	return {
-		status: 'success',
-		message: `Successfully erased the last ${erased_count} tool output(s).`
-	};
-}
-
 // Map tool name to implementation function
 const tools_mapping = {
 	list_directory_structure: listDirectoryStructure,
@@ -854,31 +749,6 @@ const tools_mapping = {
 	discard_last_steps: discardLastSteps,
 	gemini_web_search: geminiWebSearch
 };
-
-// Helper to get OS description dynamically
-function getOSDescription() {
-	try {
-		if (process.platform === 'linux') {
-			if (fs.existsSync('/etc/os-release')) {
-				const release = fs.readFileSync('/etc/os-release', 'utf8');
-				const name_match = /^PRETTY_NAME="([^"]+)"/m.exec(release) || /^NAME="([^"]+)"/m.exec(release);
-				if (name_match) {
-					return name_match[1];
-				}
-			}
-			return 'Linux';
-		}
-		if (process.platform === 'darwin') {
-			return 'macOS';
-		}
-		if (process.platform === 'win32') {
-			return 'Windows';
-		}
-		return `${os.type()} ${os.release()}`;
-	} catch (e) {
-		return 'Linux';
-	}
-}
 
 const os_name = getOSDescription();
 
@@ -1174,29 +1044,6 @@ Interaction Flow:
 \`\`\`
 and state that there are no further issues.`;
 
-// Find all nono.md files from current folder up to root
-function findNonoFiles(startDir) {
-	const files = [];
-	let currentDir = path.resolve(startDir);
-	while (true) {
-		const filePath = path.join(currentDir, 'nono.md');
-		if (fs.existsSync(filePath)) {
-			try {
-				const stat = fs.statSync(filePath);
-				if (stat.isFile()) {
-					files.push(filePath);
-				}
-			} catch (e) {}
-		}
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) {
-			break;
-		}
-		currentDir = parentDir;
-	}
-	return files;
-}
-
 // Gather content of all nono.md files found and append to system prompts
 const nonoFiles = findNonoFiles(process.cwd());
 if (nonoFiles.length > 0) {
@@ -1213,49 +1060,6 @@ if (nonoFiles.length > 0) {
 	system_prompt += customInstructions;
 	pr_review_system_prompt += customInstructions;
 	pr_review_comment_system_prompt += customInstructions;
-}
-
-// Helper to log token consumption metrics
-function logTokenUsage(model, usageMetadata, prompt) {
-	if (!usageMetadata) return;
-	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
-	if (!fs.existsSync(cache_dir)) {
-		fs.mkdirSync(cache_dir, { recursive: true });
-	}
-	const log_file = path.join(cache_dir, 'consumption.json');
-	let logs = [];
-	if (fs.existsSync(log_file)) {
-		try {
-			logs = JSON.parse(fs.readFileSync(log_file, 'utf8'));
-		} catch (e) {
-			// ignore corrupt file
-		}
-	}
-	let loggedPrompt = prompt || '';
-	if (loggedPrompt.startsWith('Perform a pull request review for the Github Pull Request:')) {
-		const match = loggedPrompt.match(/Perform a pull request review for the Github Pull Request:\s*([^\n\s.]+)/);
-		if (match) {
-			loggedPrompt = `PR review ${match[1]}`;
-		} else {
-			loggedPrompt = 'PR review';
-		}
-	}
-	const record = {
-		timestamp: new Date().toISOString(),
-		ppid: process.ppid,
-		pid: process.pid,
-		model: model,
-		promptTokenCount: usageMetadata.promptTokenCount || 0,
-		candidatesTokenCount: usageMetadata.candidatesTokenCount || 0,
-		cachedContentTokenCount: usageMetadata.cachedContentTokenCount || 0,
-		prompt: loggedPrompt
-	};
-	logs.push(record);
-	try {
-		fs.writeFileSync(log_file, JSON.stringify(logs, null, 2), 'utf8');
-	} catch (e) {
-		// ignore write error
-	}
 }
 
 // ----------------------------------------------------
