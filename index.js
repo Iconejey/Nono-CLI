@@ -116,6 +116,7 @@ let start_time = Date.now();
 global.allow_all_high_impact = false;
 
 let latest_context_size = 0;
+let api_static_overhead = null;
 let latest_tok_speed = 0;
 let total_candidates_token_count = 0;
 let total_api_duration_ms = 0;
@@ -399,6 +400,7 @@ async function ensureContextLimit(history, session_path) {
 				});
 				new_total_tokens = token_count_res.totalTokens || 0;
 			}
+			latest_context_size = new_total_tokens;
 			console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Reduced to ${formatK(new_total_tokens)} tokens\x1b[0m`);
 		}
 	} catch (e) {
@@ -2918,6 +2920,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		context_bonus += `\n\n[System Admin Mode active]`;
 	}
 
+	api_static_overhead = null;
+
 	// Add the new user query to the history
 	const full_user_prompt = `${user_query}${context_bonus}`;
 	await pushToHistoryAndCheckLimit(
@@ -3078,7 +3082,19 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						latest_tok_speed = duration_ms > 0 ? Math.round(cand_tokens / (duration_ms / 1000)) : 0;
 						total_candidates_token_count += cand_tokens;
 						total_api_duration_ms += duration_ms;
-						latest_context_size = response.usageMetadata.totalTokenCount || response.usageMetadata.promptTokenCount + response.usageMetadata.candidatesTokenCount || 0;
+
+						if (!use_vllm) {
+							const prompt_tokens = response.usageMetadata.promptTokenCount || 0;
+							const total_tokens = response.usageMetadata.totalTokenCount || prompt_tokens + cand_tokens;
+							if (api_static_overhead === null) {
+								const history_before = latest_context_size || 0;
+								api_static_overhead = Math.max(0, prompt_tokens - history_before);
+							}
+							latest_context_size = Math.max(0, total_tokens - api_static_overhead);
+						} else {
+							latest_context_size = response.usageMetadata.totalTokenCount || response.usageMetadata.promptTokenCount + response.usageMetadata.candidatesTokenCount || 0;
+						}
+
 						drawBottomLine();
 					}
 					break;
