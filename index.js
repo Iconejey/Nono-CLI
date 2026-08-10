@@ -362,15 +362,23 @@ async function handleBackgroundSummarization(session_path) {
 async function ensureContextLimit(history, session_path) {
 	if (!history || history.length === 0 || !(ai || openai)) return;
 	try {
-		let total_tokens = 0;
-		if (use_vllm) {
-			total_tokens = Math.round(JSON.stringify(history).length / 3.7);
-		} else {
-			const token_count_res = await ai.models.countTokens({
-				model: model_name,
-				contents: history
-			});
-			total_tokens = token_count_res.totalTokens || 0;
+		let total_tokens = latest_context_size || 0;
+		if (total_tokens === 0) {
+			if (use_vllm) {
+				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+			} else if (ai) {
+				try {
+					const token_count_res = await ai.models.countTokens({
+						model: model_name,
+						contents: history
+					});
+					total_tokens = token_count_res.totalTokens || 0;
+				} catch (e) {
+					total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				}
+			} else {
+				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+			}
 		}
 
 		const user_turns = history.filter(msg => {
@@ -393,12 +401,18 @@ async function ensureContextLimit(history, session_path) {
 			let new_total_tokens = 0;
 			if (use_vllm) {
 				new_total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+			} else if (ai) {
+				try {
+					const token_count_res = await ai.models.countTokens({
+						model: model_name,
+						contents: history
+					});
+					new_total_tokens = token_count_res.totalTokens || 0;
+				} catch (e) {
+					new_total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				}
 			} else {
-				const token_count_res = await ai.models.countTokens({
-					model: model_name,
-					contents: history
-				});
-				new_total_tokens = token_count_res.totalTokens || 0;
+				new_total_tokens = Math.round(JSON.stringify(history).length / 3.7);
 			}
 			latest_context_size = new_total_tokens;
 			console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Reduced to ${formatK(new_total_tokens)} tokens\x1b[0m`);
