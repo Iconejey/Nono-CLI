@@ -14,6 +14,10 @@ import prettier from 'prettier';
 import * as Diff from 'diff';
 import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
+import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
+import { loadCustomTheme, custom_theme } from './src/utils/theme.js';
+import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, getCleanThoughtLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
+import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
 
 // Load environment variables from the directory of this script or fallback locations
 const dir_name = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +37,7 @@ if (force_gemini) process.argv.splice(gemini_idx_early, 1);
 
 // Detect verbose arg early
 const verbose_idx = process.argv.indexOf('--verbose');
-const verbose = verbose_idx !== -1;
+export const verbose = verbose_idx !== -1;
 if (verbose) process.argv.splice(verbose_idx, 1);
 
 const vllm_api_key = process.env.VLLM_API_KEY;
@@ -49,7 +53,7 @@ const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, defau
 const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
 const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
-const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
+export const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
 if (!use_vllm && !api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
@@ -103,7 +107,6 @@ async function geminiWebSearch({ query }) {
 
 // Global Progress & Logging State
 let start_time = Date.now();
-let details_path = '';
 let allow_all_high_impact = false;
 
 let latest_context_size = 0;
@@ -115,12 +118,6 @@ let latest_vllm_stats = null;
 
 const original_stdout_write = process.stdout.write.bind(process.stdout);
 const original_stderr_write = process.stderr.write.bind(process.stderr);
-
-function formatK(val) {
-	const k_val = val / 1000;
-	if (k_val % 1 === 0) return k_val.toFixed(0) + 'K';
-	return k_val.toFixed(1) + 'K';
-}
 
 async function fetchVllmStatsLoop() {
 	if (!use_vllm || !vllm_stat_url) return;
@@ -230,76 +227,6 @@ process.stderr.write = function (chunk, encoding, callback) {
 
 	return result;
 };
-
-// Strip ANSI visual escape codes
-function stripAnsi(str) {
-	if (typeof str !== 'string') return str;
-	return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
-}
-
-// Helper to extract JSON block from markdown response
-function extractJsonBlock(text) {
-	if (!text) return null;
-
-	const tryLooseJsonParse = str => {
-		try {
-			return JSON.parse(str);
-		} catch (e) {}
-
-		const cleaned = str.replace(/,\s*([\]}])/g, '$1');
-		try {
-			return JSON.parse(cleaned);
-		} catch (e) {}
-
-		try {
-			const fn = new Function(`return (${cleaned});`);
-			const val = fn();
-			if (val && typeof val === 'object') {
-				return val;
-			}
-		} catch (e) {}
-
-		return null;
-	};
-
-	// Try to find all ```json ... ``` blocks
-	const regex = /```json\s*([\s\S]*?)\s*```/g;
-	let match;
-	const blocks = [];
-	while ((match = regex.exec(text)) !== null) {
-		blocks.push(match[1].trim());
-	}
-
-	// Try parsing them in reverse order (last one first)
-	for (let i = blocks.length - 1; i >= 0; i--) {
-		const parsed = tryLooseJsonParse(blocks[i]);
-		if (parsed) return parsed;
-	}
-
-	// Fallback: try to find curly braces in reverse
-	const curlyRegex = /(\{[\s\S]*?\})/g;
-	const curlyMatches = text.match(curlyRegex);
-	if (curlyMatches) {
-		for (let i = curlyMatches.length - 1; i >= 0; i--) {
-			const parsed = tryLooseJsonParse(curlyMatches[i]);
-			if (parsed) return parsed;
-		}
-	}
-
-	// Another fallback: scan for any JSON-like structure from the end of the text
-	const lastBrace = text.lastIndexOf('}');
-	if (lastBrace !== -1) {
-		const firstBrace = text.lastIndexOf('{', lastBrace);
-		if (firstBrace !== -1 && firstBrace < lastBrace) {
-			const candidate = text.substring(firstBrace, lastBrace + 1);
-			const parsed = tryLooseJsonParse(candidate);
-			if (parsed) return parsed;
-		}
-	}
-
-	writeDetails(`[JSON Parse Failure] Failed to parse JSON block from: \n${text}\n`);
-	return null;
-}
 
 // Helper to run a sub-agent for summarizing massive tool output
 async function runSummarizationSubAgent(originalResult, query) {
@@ -478,472 +405,6 @@ async function pushToHistoryAndCheckLimit(history, item, session_path) {
 	history.push(item);
 }
 
-function writeDetails(text) {
-	if (details_path) {
-		fs.appendFileSync(details_path, text + '\n', 'utf8');
-	}
-}
-
-function loadCustomTheme() {
-	let theme_json_str = '';
-
-	// 1. Check if NONO_THEME is set in the environment
-	if (process.env.NONO_THEME) {
-		const theme_val = process.env.NONO_THEME.trim();
-		if (theme_val.startsWith('{')) {
-			theme_json_str = theme_val;
-		} else {
-			const resolved_path = path.resolve(theme_val.replace(/^~/, os.homedir()));
-			if (fs.existsSync(resolved_path)) {
-				try {
-					theme_json_str = fs.readFileSync(resolved_path, 'utf8');
-				} catch (e) {
-					// Ignore read errors
-				}
-			}
-		}
-	}
-
-	// 2. Fallback to default config location: ~/.config/nono/theme.json
-	if (!theme_json_str) {
-		const default_theme_path = path.join(os.homedir(), '.config', 'nono', 'theme.json');
-		if (fs.existsSync(default_theme_path)) {
-			try {
-				theme_json_str = fs.readFileSync(default_theme_path, 'utf8');
-			} catch (e) {
-				// Ignore read errors
-			}
-		}
-	}
-
-	// 3. Fallback to hardcoded default theme (VS Code Material Theme Darker mapping)
-	if (!theme_json_str) {
-		theme_json_str = JSON.stringify({
-			keyword: 'magenta',
-			built_in: 'blue',
-			type: 'yellow',
-			literal: 'yellow',
-			number: 'yellow',
-			regexp: 'cyan',
-			string: 'green',
-			comment: 'gray',
-			class: 'blue',
-			function: 'blue',
-			tag: 'red',
-			name: 'blue',
-			attr: 'cyan',
-			addition: 'green',
-			deletion: 'red',
-			default: 'white'
-		});
-	}
-
-	if (theme_json_str) {
-		try {
-			return cliHighlight.parse(theme_json_str);
-		} catch (err) {
-			writeDetails(`[Theme Load Error] Failed to parse custom theme JSON: ${err.message}`);
-		}
-	}
-	return undefined;
-}
-
-const custom_theme = loadCustomTheme();
-
-function formatProgressLine(text, color) {
-	let ansi_prefix = '\x1b[90m'; // Default gray
-	if (color === 'red') {
-		ansi_prefix = '\x1b[31m'; // Red
-	} else if (verbose && (text.trim().startsWith('•') || text.trim().startsWith('✦'))) {
-		ansi_prefix = '\x1b[36m'; // Cyan
-	}
-	const ansi_suffix = '\x1b[0m';
-
-	let raw = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-	return `${ansi_prefix}${raw}${ansi_suffix}`;
-}
-
-function getCleanThoughtLine(text) {
-	const lines = text
-		.split('\n')
-		.map(l => l.trim())
-		.filter(l => l.length > 0);
-	if (lines.length === 0) return '';
-	let first_line = lines[0];
-	first_line = first_line.replace(/[*_`#]/g, '');
-	if (first_line.length > thought_limit) {
-		const slice_len = Math.max(0, thought_limit - 3);
-		return first_line.slice(0, slice_len) + '...';
-	}
-	return first_line;
-}
-
-function formatToolCallProgress(name, args) {
-	const basename = args.file_path ? path.basename(args.file_path) : '';
-
-	switch (name) {
-		case 'list_directory_structure': {
-			const dir = args.directory_path ? path.basename(args.directory_path) || args.directory_path : '.';
-			return `Listing directory structure of "${dir}"`;
-		}
-		case 'view_file_contents': {
-			let lines_str = '';
-			if (args.start_line !== undefined && args.end_line !== undefined) {
-				lines_str = ` (lines ${args.start_line}-${args.end_line})`;
-			} else if (args.start_line !== undefined) {
-				lines_str = ` (from line ${args.start_line})`;
-			} else if (args.end_line !== undefined) {
-				lines_str = ` (up to line ${args.end_line})`;
-			}
-			return `Viewing ${basename}${lines_str}`;
-		}
-		case 'write_file': {
-			return `Writing ${basename}`;
-		}
-		case 'patch_file': {
-			return `Patching ${basename}`;
-		}
-		case 'search_grep': {
-			return `Searching for "${args.pattern}"`;
-		}
-		case 'execute_system_command': {
-			return `Running "${args.command}"`;
-		}
-		case 'run_node_script': {
-			const first_line = (args.code || '').split('\n')[0].trim();
-			const snippet = first_line.length > 50 ? first_line.slice(0, 47) + '...' : first_line;
-			return `Running Node script: "${snippet}"`;
-		}
-		case 'propose_terminal_input': {
-			return `Proposing terminal input: "${args.command_to_inject}"`;
-		}
-		case 'read_terminal_buffer': {
-			return `Reading terminal buffer`;
-		}
-
-		case 'view_file_git_diff': {
-			return `Viewing git diff for ${basename}`;
-		}
-		case 'gemini_web_search': {
-			return `Searching the web for "${args.query}"`;
-		}
-		case 'discard_specific_output': {
-			return `Discarding output for "${args.target}"`;
-		}
-		case 'discard_last_steps': {
-			return `Discarding the last ${args.steps_count} steps`;
-		}
-		default: {
-			const arg_vals = Object.values(args)
-				.map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
-				.join(' ');
-			return arg_vals ? `${name} ${arg_vals}` : name;
-		}
-	}
-}
-
-const languageToParser = {
-	js: 'babel',
-	javascript: 'babel',
-	jsx: 'babel',
-	mjs: 'babel',
-	cjs: 'babel',
-	ts: 'typescript',
-	typescript: 'typescript',
-	tsx: 'typescript',
-	json: 'json',
-	json5: 'json',
-	css: 'css',
-	scss: 'scss',
-	less: 'less',
-	html: 'html',
-	yaml: 'yaml',
-	yml: 'yaml',
-	md: 'markdown',
-	markdown: 'markdown'
-};
-
-async function formatCodeWithPrettier(code, lang) {
-	if (!lang) return code;
-	const parser = languageToParser[lang.toLowerCase()];
-	if (!parser) {
-		return code;
-	}
-	try {
-		const config = (await prettier.resolveConfig(process.cwd())) || {};
-		const formatted = await prettier.format(code, {
-			...config,
-			tabWidth: 4,
-			useTabs: false,
-			parser
-		});
-		return formatted.trimEnd();
-	} catch (e) {
-		return code;
-	}
-}
-
-// Helper to format markdown text beautifully for the terminal output
-function processInlineStyles(line) {
-	line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
-	line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
-	line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
-	return line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
-}
-
-function formatTable(table_lines) {
-	if (table_lines.length < 2) return table_lines;
-
-	const first_line = table_lines[0];
-	const indent_match = first_line.match(/^\s*/);
-	const indent = indent_match ? indent_match[0] : '';
-
-	const parseRowCells = line => {
-		const trimmed = line.trim();
-		const parts = trimmed.split(/(?<!\\)\|/);
-		return parts.slice(1, parts.length - 1).map(c => c.trim().replace(/\\\|/g, '|'));
-	};
-
-	const rows = [];
-	for (let i = 0; i < table_lines.length; i++) {
-		if (i === 1) continue;
-		const cells = parseRowCells(table_lines[i]);
-		const processed_cells = cells.map(c => processInlineStyles(c));
-		rows.push({
-			index: i,
-			processed: processed_cells
-		});
-	}
-
-	if (rows.length === 0) return table_lines;
-	const num_cols = rows[0].processed.length;
-	if (num_cols === 0) return table_lines;
-
-	const stripAnsi = str => str.replace(/\x1b\[[0-9;]*m/g, '');
-
-	const col_widths = [];
-	for (let col_idx = 0; col_idx < num_cols; col_idx++) {
-		let max_w = 0;
-		for (const row of rows) {
-			const cell = row.processed[col_idx] || '';
-			const visual_len = stripAnsi(cell).length;
-			if (visual_len > max_w) max_w = visual_len;
-		}
-		col_widths.push(max_w);
-	}
-
-	const buildBorderLine = (start_char, mid_char, end_char) => {
-		let result = start_char;
-		for (let j = 0; j < num_cols; j++) {
-			result += '─'.repeat(col_widths[j] + 2);
-			if (j < num_cols - 1) result += mid_char;
-		}
-		result += end_char;
-		return indent + result;
-	};
-
-	const top_border = buildBorderLine('┌', '┬', '┐');
-	const separator_row = buildBorderLine('├', '┼', '┤');
-	const bottom_border = buildBorderLine('└', '┴', '┘');
-
-	const formatRow = processed_cells => {
-		let result = '│';
-		for (let j = 0; j < num_cols; j++) {
-			const cell = processed_cells[j] || '';
-			const visual_len = stripAnsi(cell).length;
-			const padding_len = col_widths[j] - visual_len;
-			result += ' ' + cell + ' '.repeat(padding_len) + ' │';
-		}
-		return indent + result;
-	};
-
-	const formatted = [];
-	formatted.push(top_border);
-	formatted.push(formatRow(rows[0].processed));
-	formatted.push(separator_row);
-
-	for (let i = 1; i < rows.length; i++) {
-		formatted.push(formatRow(rows[i].processed));
-	}
-
-	formatted.push(bottom_border);
-	return formatted;
-}
-
-async function formatMarkdownForTerminal(md, options = {}) {
-	if (!md) return '';
-	const header_color = options?.header_color ?? '\x1b[1;35m';
-	try {
-		md = await formatCodeWithPrettier(md, 'markdown');
-	} catch (e) {
-		// fallback
-	}
-	const lines = md.split('\n');
-	const formatted_lines = [];
-	let in_code_block = false;
-	let code_block_lines = [];
-	let code_block_lang = '';
-	let table_lines = [];
-
-	const flushTable = () => {
-		if (table_lines.length > 0) {
-			const formatted_table = formatTable(table_lines);
-			for (const t_line of formatted_table) {
-				formatted_lines.push(t_line);
-			}
-			table_lines = [];
-		}
-	};
-
-	for (let line of lines) {
-		const is_table_line = line.trim().startsWith('|') && line.trim().endsWith('|');
-
-		if (is_table_line && !in_code_block) {
-			table_lines.push(line);
-			continue;
-		}
-
-		flushTable();
-
-		// Handle Code Block delimiters
-		if (line.trim().startsWith('```')) {
-			if (!in_code_block) {
-				in_code_block = true;
-				code_block_lang = line.trim().slice(3).trim();
-				code_block_lines = [];
-			} else {
-				in_code_block = false;
-				const code_text = code_block_lines.join('\n');
-				const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
-				let highlighted_text = code_text;
-				if (is_highlighted) {
-					try {
-						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-						highlighted_text = cliHighlight.highlight(formatted_code, {
-							language: code_block_lang,
-							ignoreIllegals: true,
-							theme: custom_theme
-						});
-					} catch (e) {
-						// fallback
-					}
-				}
-				const highlighted_lines = highlighted_text.split('\n');
-				for (const h_line of highlighted_lines) {
-					if (is_highlighted) {
-						formatted_lines.push(`  \x1b[90m│\x1b[0m  ${h_line}`);
-					} else {
-						formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${h_line}\x1b[0m`);
-					}
-				}
-			}
-			continue;
-		}
-
-		if (in_code_block) {
-			code_block_lines.push(line);
-			continue;
-		}
-
-		// Skip horizontal rules/thematic breaks ('---')
-		if (line.trim() === '---') continue;
-
-		// Handle Headers: convert ### Title to Bold Purple/Blue
-		const header_match = /^#{1,6}\s+(.*)$/.exec(line);
-		if (header_match) {
-			const header_text = header_match[1];
-			formatted_lines.push(`${header_color}${header_text}\x1b[0m`);
-			continue;
-		}
-
-		// Handle Quotes: > quote
-		const quote_match = /^(\s*)>\s?(.*)$/.exec(line);
-		if (quote_match) {
-			const indent = quote_match[1];
-			const content = quote_match[2];
-			let processed_content = processInlineStyles(content);
-			processed_content = processed_content.replace(/\x1b\[0m/g, '\x1b[0m\x1b[90m');
-			formatted_lines.push(`${indent}  \x1b[90m│\x1b[0m  \x1b[90m${processed_content}\x1b[0m`);
-			continue;
-		}
-
-		// Handle Unordered List Items: convert * item or - item to • item
-		const list_match = /^(\s*)[-*]\s+(.*)$/.exec(line);
-		if (list_match) {
-			const indent = list_match[1];
-			const content = list_match[2];
-			line = `${indent}• ${content}`;
-		}
-
-		// Process inline styles
-		formatted_lines.push(processInlineStyles(line));
-	}
-
-	flushTable();
-
-	if (in_code_block && code_block_lines.length > 0) {
-		const code_text = code_block_lines.join('\n');
-		const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
-		let highlighted_text = code_text;
-		if (is_highlighted) {
-			try {
-				const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-				highlighted_text = cliHighlight.highlight(formatted_code, {
-					language: code_block_lang,
-					ignoreIllegals: true,
-					theme: custom_theme
-				});
-			} catch (e) {
-				// fallback
-			}
-		}
-		const highlighted_lines = highlighted_text.split('\n');
-		for (const h_line of highlighted_lines) {
-			if (is_highlighted) {
-				formatted_lines.push(`  \x1b[90m│\x1b[0m  ${h_line}`);
-			} else {
-				formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${h_line}\x1b[0m`);
-			}
-		}
-	}
-
-	return formatted_lines.join('\n');
-}
-
-function getPRNameFromPPID(ppid) {
-	if (!ppid) return null;
-	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
-	const prMetaPath = path.join(cache_dir, `pr-meta-${ppid}.json`);
-	if (fs.existsSync(prMetaPath)) {
-		try {
-			const meta = JSON.parse(fs.readFileSync(prMetaPath, 'utf8'));
-			if (meta) {
-				if (meta.owner && meta.repo && meta.pullNumber) {
-					return `${meta.owner}/${meta.repo}#${meta.pullNumber}`;
-				}
-				if (meta.tempDir) {
-					const folderName = path.basename(meta.tempDir);
-					// Format: nono-pr-owner-repo-pullNumber-timestamp
-					const match = folderName.match(/nono-pr-(.+)-([0-9]+)-([0-9]+)$/);
-					if (match) {
-						const ownerRepo = match[1];
-						const pullNumber = match[2];
-						const firstHyphenIdx = ownerRepo.indexOf('-');
-						if (firstHyphenIdx !== -1) {
-							const owner = ownerRepo.substring(0, firstHyphenIdx);
-							const repo = ownerRepo.substring(firstHyphenIdx + 1);
-							return `${owner}/${repo}#${pullNumber}`;
-						}
-					}
-				}
-			}
-		} catch (e) {
-			// ignore
-		}
-	}
-	return null;
-}
-
 function findSessionModelMessages() {
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
 	if (!fs.existsSync(cache_dir)) return [];
@@ -985,80 +446,6 @@ function findSessionModelMessages() {
 	return [];
 }
 
-async function highlightRawMarkdown(md) {
-	if (!md) return '';
-	const lines = md.split('\n');
-	const output_lines = [];
-	let in_code_block = false;
-	let code_block_lines = [];
-	let code_block_lang = '';
-
-	for (let line of lines) {
-		if (line.trim().startsWith('```')) {
-			if (!in_code_block) {
-				in_code_block = true;
-				code_block_lang = line.trim().slice(3).trim();
-				code_block_lines = [];
-				// Highlight the code block opening tag as markdown
-				output_lines.push(
-					cliHighlight
-						.highlight(line, {
-							language: 'markdown',
-							ignoreIllegals: true,
-							theme: custom_theme
-						})
-						.trimEnd()
-				);
-			} else {
-				in_code_block = false;
-				const code_text = code_block_lines.join('\n');
-				const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
-				let highlighted_text = code_text;
-				if (is_highlighted) {
-					try {
-						const formatted_code = await formatCodeWithPrettier(code_text, code_block_lang);
-						highlighted_text = cliHighlight.highlight(formatted_code, {
-							language: code_block_lang,
-							ignoreIllegals: true,
-							theme: custom_theme
-						});
-					} catch (e) {
-						// fallback
-					}
-				}
-				output_lines.push(highlighted_text.trimEnd());
-				// Highlight the code block closing tag as markdown
-				output_lines.push(
-					cliHighlight
-						.highlight(line, {
-							language: 'markdown',
-							ignoreIllegals: true,
-							theme: custom_theme
-						})
-						.trimEnd()
-				);
-			}
-			continue;
-		}
-
-		if (in_code_block) {
-			code_block_lines.push(line);
-		} else {
-			// Highlight standard markdown line
-			output_lines.push(
-				cliHighlight
-					.highlight(line, {
-						language: 'markdown',
-						ignoreIllegals: true,
-						theme: custom_theme
-					})
-					.trimEnd()
-			);
-		}
-	}
-	return output_lines.join('\n');
-}
-
 function updateProgress(raw_text, color) {
 	const line = formatProgressLine(raw_text, color);
 	console.log(line);
@@ -1066,15 +453,6 @@ function updateProgress(raw_text, color) {
 
 function clearProgress() {
 	clearBottomLine();
-}
-
-function formatElapsedTime(seconds) {
-	if (seconds >= 60) {
-		const m = Math.floor(seconds / 60);
-		const s = seconds % 60;
-		return `${m}m ${s}s`;
-	}
-	return `${seconds}s`;
 }
 
 async function finishProgress(final_text, grounding_sources) {
@@ -4387,8 +3765,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	start_time = Date.now();
 
 	// Create/Clear details file for this command run
-	details_path = path.join(cache_dir, `details-${process.ppid}.log`);
-	fs.writeFileSync(details_path, '', 'utf8');
+	setDetailsPath(path.join(cache_dir, `details-${process.ppid}.log`));
+	fs.writeFileSync(getDetailsPath(), '', 'utf8');
 
 	// Load or initialize session
 	const session_path = is_pr_review ? path.join(cache_dir, `session-pr-${process.ppid}.json`) : path.join(cache_dir, `session-${process.ppid}.json`);
