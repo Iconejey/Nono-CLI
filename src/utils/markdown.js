@@ -108,7 +108,11 @@ export async function formatCodeWithPrettier(code, lang) {
 
 export async function formatMarkdownForTerminal(md, options = {}) {
 	if (!md) return '';
-	const header_color = options?.header_color ?? '\x1b[1;35m';
+	const is_gray = options?.color === 'gray' || options?.gray;
+	const resetStyle = is_gray ? '\x1b[0m\x1b[90m' : '\x1b[0m';
+	const base_color = is_gray ? '\x1b[90m' : '';
+	const header_color = is_gray ? '\x1b[1;90m' : (options?.header_color ?? '\x1b[1;35m');
+
 	try {
 		md = await formatCodeWithPrettier(md, 'markdown');
 	} catch (e) {
@@ -123,9 +127,13 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 
 	const flushTable = () => {
 		if (table_lines.length > 0) {
-			const formatted_table = formatTable(table_lines);
+			const formatted_table = formatTable(table_lines, resetStyle);
 			for (const t_line of formatted_table) {
-				formatted_lines.push(t_line);
+				if (is_gray) {
+					formatted_lines.push(`\x1b[90m${t_line}\x1b[0m`);
+				} else {
+					formatted_lines.push(t_line);
+				}
 			}
 			table_lines = [];
 		}
@@ -150,7 +158,7 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 			} else {
 				in_code_block = false;
 				const code_text = code_block_lines.join('\n');
-				const is_highlighted = code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
+				const is_highlighted = !is_gray && code_block_lang && cliHighlight.supportsLanguage(code_block_lang);
 				let highlighted_text = code_text;
 				if (is_highlighted) {
 					try {
@@ -169,7 +177,8 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 					if (is_highlighted) {
 						formatted_lines.push(`  \x1b[90m│\x1b[0m  ${h_line}`);
 					} else {
-						formatted_lines.push(`  \x1b[90m│\x1b[0m  \x1b[37m${h_line}\x1b[0m`);
+						const code_line_color = is_gray ? '\x1b[90m' : '\x1b[37m';
+						formatted_lines.push(`  \x1b[90m│\x1b[0m  ${code_line_color}${h_line}\x1b[0m`);
 					}
 				}
 			}
@@ -187,15 +196,19 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 			if (hash_match) {
 				const depth = hash_match[1].length;
 				const title = hash_match[2];
-				const styled_title = processInlineStyles(title);
+				const styled_title = processInlineStyles(title, resetStyle);
 				formatted_lines.push(`\n${header_color}${styled_title}\x1b[0m`);
 				continue;
 			}
 		}
 
 		// Handle standard lists & text lines
-		let processed = processInlineStyles(line);
-		formatted_lines.push(processed);
+		let processed = processInlineStyles(line, resetStyle);
+		if (is_gray) {
+			formatted_lines.push(`${base_color}${processed}\x1b[0m`);
+		} else {
+			formatted_lines.push(processed);
+		}
 	}
 
 	flushTable();

@@ -16,7 +16,7 @@ import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
 import { writeDetails, getDetailsPath, setDetailsPath, logTokenUsage } from './src/utils/logger.js';
 import { loadCustomTheme, custom_theme } from './src/utils/theme.js';
-import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, getCleanThoughtLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
+import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
 import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
 import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
 import { findCorrespondingCall, matchesTarget, discardSpecificOutput, discardLastSteps } from './src/utils/history.js';
@@ -526,8 +526,6 @@ function clearProgress() {
 
 async function finishProgress(final_text, grounding_sources) {
 	clearProgress();
-	const elapsed = Math.round((Date.now() - start_time) / 1000);
-	console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
 	const formatted = await formatMarkdownForTerminal(cleanModelText(final_text).trim());
 	console.log();
 	console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
@@ -555,14 +553,17 @@ async function finishProgress(final_text, grounding_sources) {
 		avg_tok_speed = total_api_duration_ms > 0 ? Math.round(total_candidates_token_count / (total_api_duration_ms / 1000)) : 0;
 	}
 
+	const elapsed = Math.round((Date.now() - start_time) / 1000);
+	const elapsed_str = formatElapsedTime(elapsed);
+
 	let line;
 	if (use_vllm) {
 		const ttft_str = vllm_ttft !== null ? `${vllm_ttft.toFixed(1)}s TTFT` : '--s TTFT';
 		const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
-		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str} | ${ttft_str}\x1b[0m`;
+		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str} | ${ttft_str} | ${elapsed_str}\x1b[0m`;
 	} else {
 		const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
-		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str} | ${elapsed_str}\x1b[0m`;
 	}
 	console.log(line);
 	console.log();
@@ -573,8 +574,6 @@ async function finishProgress(final_text, grounding_sources) {
 
 function finishProgressError(err_msg) {
 	clearProgress();
-	const elapsed = Math.round((Date.now() - start_time) / 1000);
-	console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
 	console.log(`\x1b[31m✦ Error: ${err_msg}\x1b[0m`);
 	playChime('error');
 	writeDetails(`\n[Fatal Error]\n${err_msg}`);
@@ -811,6 +810,45 @@ function proposeTerminalInput({ command_to_inject }) {
 	});
 }
 
+async function commentTool({ text }) {
+	clearProgress();
+	const formatted = await formatMarkdownForTerminal(text, { color: 'gray' });
+	const lines = formatted.split('\n');
+	let firstNonEmptyIndex = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim()) {
+			firstNonEmptyIndex = i;
+			break;
+		}
+	}
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (i === firstNonEmptyIndex) {
+			console.log(`\x1b[90m•\x1b[0m ${line}`);
+		} else if (i > firstNonEmptyIndex) {
+			if (line.trim() === '') {
+				console.log('');
+			} else {
+				console.log(`  ${line}`);
+			}
+		} else {
+			console.log(line);
+		}
+	}
+	return {
+		status: 'success',
+		message: 'Comment printed successfully.'
+	};
+}
+
+async function finalAnswerTool({ response }) {
+	return {
+		status: 'success',
+		message: 'Final answer received. Concluding task.'
+	};
+}
+
 // Map tool name to implementation function
 const tools_mapping = {
 	list_directory_structure: listDirectoryStructure,
@@ -825,7 +863,9 @@ const tools_mapping = {
 	view_file_git_diff: viewFileGitDiff,
 	discard_specific_output: discardSpecificOutput,
 	discard_last_steps: discardLastSteps,
-	gemini_web_search: geminiWebSearch
+	gemini_web_search: geminiWebSearch,
+	comment: commentTool,
+	final_answer: finalAnswerTool
 };
 
 const os_name = getOSDescription();
@@ -837,6 +877,34 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 
 const tools_declarations = [
+	{
+		name: 'comment',
+		description: 'Outputs a thought, comment, explanation, or progress update to the user. Use this to explain your strategy, status, or plans.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				text: {
+					type: 'STRING',
+					description: 'The comment or thought text (can be markdown, multi-line).'
+				}
+			},
+			required: ['text']
+		}
+	},
+	{
+		name: 'final_answer',
+		description: 'Concludes the task and provides the final answer or solution to the user. Use this only when you are completely finished with the task.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				response: {
+					type: 'STRING',
+					description: 'The final response/solution text to present to the user (can be markdown).'
+				}
+			},
+			required: ['response']
+		}
+	},
 	{
 		name: 'discard_specific_output',
 		description:
@@ -3038,7 +3106,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	const grounding_sources = [];
 	const web_search_queries = [];
 	let autoContinueCount = 0;
-	while (true) {
+	reactLoop: while (true) {
 		try {
 			let response;
 			let attempts = 0;
@@ -3305,19 +3373,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 			if (text_part && text_part.text) {
 				writeDetails(`\n[Model Thought]\n${text_part.text.trim()}`);
-				if (has_function_calls) {
-					const thought_summary = getCleanThoughtLine(text_part.text);
-					if (thought_summary) {
-						updateProgress(`• ${thought_summary}`);
-					}
-				}
 			}
 
 			if (!has_function_calls) {
 				if (isCommentMode) {
 					clearProgress();
-					const elapsed = Math.round((Date.now() - start_time) / 1000);
-					console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Worked for ${formatElapsedTime(elapsed)}\x1b[0m`);
 
 					const text = text_part ? text_part.text : '';
 					const cleanText = text.replace(/```json[\s\S]*?```/, '').trim();
@@ -3454,33 +3514,18 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					start_time = Date.now();
 					continue;
 				} else {
-					// No functions to call, we have reached the final state
-					const final_msg = text_part ? text_part.text : 'Task completed.';
-					const isTaskCompletedMsg =
-						final_msg
-							.trim()
-							.toLowerCase()
-							.replace(/[.\s✦•*-]+/g, '') === 'taskcompleted';
+					// No functions to call but hasn't called final_answer!
+					// Push a user/assistant nudge to force the loop to continue.
+					writeDetails(`[Loop Nudge] Model did not call any tools. Nudging to continue.`);
+					history.push({
+						role: 'user',
+						parts: [{ text: 'Please continue the task using the appropriate tools. If you are completely done, you MUST call the "final_answer" tool with your final response.' }]
+					});
+					pruneHistory(history);
+					fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 
-					if (auto_continue && isTaskCompletedMsg && autoContinueCount < 3) {
-						autoContinueCount++;
-						await finishProgress(final_msg, grounding_sources);
-						console.log(`\x1b[33mAuto-continuing (${autoContinueCount}/3)... \x1b[0m\n`);
-
-						history.push({
-							role: 'user',
-							parts: [{ text: 'continue' }]
-						});
-
-						pruneHistory(history);
-						fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
-
-						start_time = Date.now();
-						continue;
-					}
-
-					await finishProgress(final_msg, grounding_sources);
-					break;
+					start_time = Date.now();
+					continue;
 				}
 			}
 
@@ -3527,7 +3572,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					};
 				}
 
-				if (name !== 'write_file' && name !== 'patch_file') {
+				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer') {
 					const tool_progress = formatToolCallProgress(name, args);
 					const suffix = isSummarized ? ' \x1b[90m[sum]\x1b[0m' : '';
 					const progressLine = formatProgressLine(`• ${tool_progress}${suffix}`);
@@ -3544,6 +3589,19 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					function_response_part.functionResponse.id = id;
 				}
 				response_parts.push(function_response_part);
+
+				if (name === 'final_answer') {
+					await finishProgress(args.response || 'Task completed.', grounding_sources);
+					await pushToHistoryAndCheckLimit(
+						history,
+						{
+							role: 'user',
+							parts: response_parts
+						},
+						session_path
+					);
+					break reactLoop;
+				}
 			}
 
 			// Push user/tool execution results back into the conversation history

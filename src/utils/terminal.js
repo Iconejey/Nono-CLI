@@ -70,21 +70,6 @@ export function formatProgressLine(text, color) {
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
-export function getCleanThoughtLine(text) {
-	const lines = text
-		.split('\n')
-		.map(l => l.trim())
-		.filter(l => l.length > 0);
-	if (lines.length === 0) return '';
-	let first_line = lines[0];
-	first_line = first_line.replace(/[*_`#]/g, '');
-	if (first_line.length > thought_limit) {
-		const slice_len = Math.max(0, thought_limit - 3);
-		return first_line.slice(0, slice_len) + '...';
-	}
-	return first_line;
-}
-
 export function formatToolCallProgress(name, args) {
 	const basename = args.file_path ? path.basename(args.file_path) : '';
 
@@ -149,14 +134,19 @@ export function formatToolCallProgress(name, args) {
 	}
 }
 
-export function processInlineStyles(line) {
-	line = line.replace(/`([^`]+)`/g, '\x1b[36m$1\x1b[0m');
-	line = line.replace(/\*\*([^*]+)\*\*/g, '\x1b[1m$1\x1b[0m');
-	line = line.replace(/\*([^*]+)\*/g, '\x1b[4m$1\x1b[0m');
-	return line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, '\x1b[4m$1\x1b[0m');
+export function processInlineStyles(line, resetStyle = '\x1b[0m') {
+	const is_gray = resetStyle.includes('90m');
+	const backtick_style = is_gray ? '\x1b[90m' : '\x1b[36m';
+	const bold_style = is_gray ? '\x1b[1;90m' : '\x1b[1m';
+	const italic_style = is_gray ? '\x1b[4;90m' : '\x1b[4m';
+
+	line = line.replace(/`([^`]+)`/g, `${backtick_style}$1${resetStyle}`);
+	line = line.replace(/\*\*([^*]+)\*\*/g, `${bold_style}$1${resetStyle}`);
+	line = line.replace(/\*([^*]+)\*/g, `${italic_style}$1${resetStyle}`);
+	return line.replace(/(?:^|(?<=\W))_([^_]+)_(?=\W|$)/g, `${italic_style}$1${resetStyle}`);
 }
 
-export function formatTable(table_lines) {
+export function formatTable(table_lines, resetStyle = '\x1b[0m') {
 	if (table_lines.length < 2) return table_lines;
 
 	const first_line = table_lines[0];
@@ -173,7 +163,7 @@ export function formatTable(table_lines) {
 	for (let i = 0; i < table_lines.length; i++) {
 		if (i === 1) continue;
 		const cells = parseRowCells(table_lines[i]);
-		const processed_cells = cells.map(c => processInlineStyles(c));
+		const processed_cells = cells.map(c => processInlineStyles(c, resetStyle));
 		rows.push({
 			index: i,
 			processed: processed_cells
