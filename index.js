@@ -136,6 +136,29 @@ async function fetchVllmStatsLoop() {
 			clearTimeout(timeout_id);
 			if (res.ok) {
 				latest_vllm_stats = await res.json();
+				if (is_talking_active && latest_vllm_stats?.vllm && latest_vllm_stats.vllm.generation_tokens_total !== undefined) {
+					if (vllm_baseline_generation === null) {
+						vllm_baseline_generation = latest_vllm_stats.vllm.generation_tokens_total;
+					}
+					talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
+					if (talking_token_count > 0 && vllm_ttft === null && vllm_request_start_time !== null) {
+						vllm_ttft = (Date.now() - vllm_request_start_time) / 1000;
+					}
+
+					const current_tokens = latest_vllm_stats.vllm.generation_tokens_total;
+					const current_time = Date.now();
+					if (last_vllm_tokens !== null && last_vllm_time !== null) {
+						const delta_tokens = current_tokens - last_vllm_tokens;
+						const delta_time_s = (current_time - last_vllm_time) / 1000;
+						if (delta_tokens > 0 && delta_time_s > 0) {
+							const speed = delta_tokens / delta_time_s;
+							latest_vllm_tick_speed = speed;
+							vllm_tick_speeds.push(speed);
+						}
+					}
+					last_vllm_tokens = current_tokens;
+					last_vllm_time = current_time;
+				}
 				if (is_bottom_line_active) drawBottomLine();
 			}
 		} catch (err) {
@@ -153,6 +176,15 @@ let talking_token_count = 0;
 let current_tool_being_called = null;
 let vllm_baseline_generation = null;
 let vllm_start_time = null;
+let latest_vllm_generation_duration_ms = null;
+
+// New tracking variables for tick speed and TTFT
+let vllm_request_start_time = null;
+let vllm_ttft = null;
+let last_vllm_tokens = null;
+let last_vllm_time = null;
+let latest_vllm_tick_speed = 0;
+let vllm_tick_speeds = [];
 
 function drawBottomLine() {
 	if (!ai && !openai) return;
@@ -167,9 +199,8 @@ function drawBottomLine() {
 				vllm_baseline_generation = latest_vllm_stats.vllm.generation_tokens_total;
 			}
 			talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
-			if (vllm_start_time) {
-				const elapsed_s = (Date.now() - vllm_start_time) / 1000;
-				latest_tok_speed = elapsed_s > 0 ? Math.round(talking_token_count / elapsed_s) : 0;
+			if (talking_token_count > 0 && vllm_ttft === null && vllm_request_start_time !== null) {
+				vllm_ttft = (Date.now() - vllm_request_start_time) / 1000;
 			}
 		}
 	}
@@ -177,29 +208,45 @@ function drawBottomLine() {
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
 	const formatted_current = formatK(current_tokens);
 	const formatted_limit = formatK(token_limit);
-	const speed_str = latest_tok_speed > 0 ? `${latest_tok_speed} tok/s` : '-- tok/s';
 
-	const parts = [`${formatted_current} / ${formatted_limit} (${pct}%)`, speed_str];
+	const parts = [`${formatted_current} / ${formatted_limit} (${pct}%)`];
 
+	const hot_devices = [];
 	if (use_vllm && latest_vllm_stats) {
-		if (latest_vllm_stats.cpu) {
-			parts.push(`CPU ${Math.round(latest_vllm_stats.cpu.usage_percentage)}% ${Math.round(latest_vllm_stats.cpu.temperature_celsius)}°C`);
+		if (latest_vllm_stats.cpu && latest_vllm_stats.cpu.temperature_celsius >= 80) {
+			hot_devices.push(`CPU ${Math.round(latest_vllm_stats.cpu.temperature_celsius)}°C`);
 		}
 		if (latest_vllm_stats.gpus && Array.isArray(latest_vllm_stats.gpus)) {
 			latest_vllm_stats.gpus.forEach(gpu => {
-				parts.push(`GPU${gpu.index} ${Math.round(gpu.usage_percentage)}% ${Math.round(gpu.temperature_celsius)}°C`);
+				if (gpu.temperature_celsius >= 80) {
+					hot_devices.push(`GPU${gpu.index} ${Math.round(gpu.temperature_celsius)}°C`);
+				}
 			});
 		}
+	}
+	if (hot_devices.length > 0) {
+		parts.push(hot_devices.join(' | '));
 	}
 
 	let suffix = '';
 	if (current_tool_being_called) {
-		suffix = ` - Calling ${current_tool_being_called}`;
+		suffix = ` | Calling ${current_tool_being_called}`;
 	} else if (is_talking_active) {
-		if (talking_token_count > 0) {
-			suffix = ` - Generating (${talking_token_count} tokens)`;
+		if (use_vllm) {
+			if (talking_token_count > 0) {
+				const ttft_str = vllm_ttft !== null ? `${vllm_ttft.toFixed(1)}s TTFT` : '--s TTFT';
+				const speed_val = Math.round(latest_vllm_tick_speed);
+				const speed_str = speed_val > 0 ? `${speed_val} tok/s` : '-- tok/s';
+				suffix = ` | Generating (${talking_token_count} tok, ${speed_str}, ${ttft_str})`;
+			} else {
+				suffix = ` | Processing...`;
+			}
 		} else {
-			suffix = ` - Generating...`;
+			if (talking_token_count > 0) {
+				suffix = ` | Generating (${talking_token_count} tokens)`;
+			} else {
+				suffix = ` | Generating...`;
+			}
 		}
 	}
 
@@ -499,9 +546,24 @@ async function finishProgress(final_text, grounding_sources) {
 	const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
 	const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
 	const formatted_limit = (token_limit / 1000).toFixed(1) + 'K';
-	const avg_tok_speed = total_api_duration_ms > 0 ? Math.round(total_candidates_token_count / (total_api_duration_ms / 1000)) : 0;
-	const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
-	const line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+
+	let avg_tok_speed = 0;
+	if (use_vllm && vllm_tick_speeds.length > 0) {
+		const sum = vllm_tick_speeds.reduce((a, b) => a + b, 0);
+		avg_tok_speed = Math.round(sum / vllm_tick_speeds.length);
+	} else {
+		avg_tok_speed = total_api_duration_ms > 0 ? Math.round(total_candidates_token_count / (total_api_duration_ms / 1000)) : 0;
+	}
+
+	let line;
+	if (use_vllm) {
+		const ttft_str = vllm_ttft !== null ? `${vllm_ttft.toFixed(1)}s TTFT` : '--s TTFT';
+		const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
+		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str} | ${ttft_str}\x1b[0m`;
+	} else {
+		const speed_str = avg_tok_speed > 0 ? `${avg_tok_speed} tok/s` : '-- tok/s';
+		line = `\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%) | ${speed_str}\x1b[0m`;
+	}
 	console.log(line);
 	console.log();
 
@@ -2935,6 +2997,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	}
 
 	api_static_overhead = null;
+	total_candidates_token_count = 0;
+	total_api_duration_ms = 0;
+	vllm_ttft = null;
+	vllm_tick_speeds = [];
 
 	// Add the new user query to the history
 	const full_user_prompt = `${user_query}${context_bonus}`;
@@ -2992,9 +3058,15 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						is_talking_active = true;
 						talking_token_count = 0;
 						latest_tok_speed = 0;
-						vllm_start_time = Date.now();
+						vllm_start_time = null;
 						vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total !== undefined ? latest_vllm_stats.vllm.generation_tokens_total : null;
 						current_tool_being_called = null;
+
+						vllm_request_start_time = Date.now();
+						last_vllm_tokens = null;
+						last_vllm_time = null;
+						latest_vllm_tick_speed = 0;
+
 						drawBottomLine();
 
 						const oai_response = await openai.chat.completions.create({
@@ -3006,6 +3078,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						});
 
 						is_talking_active = false;
+						if (vllm_start_time) {
+							latest_vllm_generation_duration_ms = Date.now() - vllm_start_time;
+						} else {
+							latest_vllm_generation_duration_ms = null;
+						}
 						vllm_baseline_generation = null;
 						vllm_start_time = null;
 						drawBottomLine();
@@ -3093,9 +3170,13 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					const duration_ms = Date.now() - start_api_time;
 					if (response && response.usageMetadata) {
 						const cand_tokens = response.usageMetadata.candidatesTokenCount || 0;
-						latest_tok_speed = duration_ms > 0 ? Math.round(cand_tokens / (duration_ms / 1000)) : 0;
+						let speed_duration_ms = duration_ms;
+						if (use_vllm && latest_vllm_generation_duration_ms !== null) {
+							speed_duration_ms = latest_vllm_generation_duration_ms;
+						}
+						latest_tok_speed = speed_duration_ms > 0 ? Math.round(cand_tokens / (speed_duration_ms / 1000)) : 0;
 						total_candidates_token_count += cand_tokens;
-						total_api_duration_ms += duration_ms;
+						total_api_duration_ms += speed_duration_ms;
 
 						if (!use_vllm) {
 							const prompt_tokens = response.usageMetadata.promptTokenCount || 0;
