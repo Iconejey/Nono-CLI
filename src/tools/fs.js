@@ -87,7 +87,7 @@ export function viewFileContents({ file_path, start_line, end_line }) {
 	};
 }
 
-export function writeFile({ file_path, content }) {
+export async function writeFile({ file_path, content }) {
 	const abs_path = path.resolve(file_path);
 	const dir = path.dirname(abs_path);
 	if (!fs.existsSync(dir)) {
@@ -102,7 +102,7 @@ export function writeFile({ file_path, content }) {
 	const { deleted, added } = getLineDiff(old_content, final_content);
 	updateProgress(`• Writing ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
-	const diff_text = getFileDiffText(old_content, final_content, file_path);
+	const diff_text = await getFileDiffText(old_content, final_content, file_path);
 
 	const lint_result = runProjectDryRun(abs_path);
 	const node_check = runNodeSyntaxCheck(abs_path);
@@ -115,7 +115,7 @@ export function writeFile({ file_path, content }) {
 	};
 }
 
-export function patchFile({ file_path, search_block, replace_block }) {
+export async function patchFile({ file_path, search_block, replace_block }) {
 	const abs_path = path.resolve(file_path);
 	if (!fs.existsSync(abs_path)) {
 		throw new Error(`File does not exist: ${file_path}`);
@@ -145,7 +145,7 @@ export function patchFile({ file_path, search_block, replace_block }) {
 	const { deleted, added } = getLineDiff(old_content, final_content);
 	updateProgress(`• Patching ${path.basename(file_path)} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 
-	const diff_text = getFileDiffText(old_content, final_content, file_path);
+	const diff_text = await getFileDiffText(old_content, final_content, file_path);
 
 	const lint_result = runProjectDryRun(abs_path);
 	const node_check = runNodeSyntaxCheck(abs_path);

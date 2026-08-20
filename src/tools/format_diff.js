@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { exec, execSync } from 'child_process';
-import * as Diff from 'diff';
 
 export const IGNORED_FILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Cargo.lock', 'go.sum'];
 
@@ -168,7 +167,8 @@ export function getLineDiff(oldStr, newStr) {
 	return { deleted, added };
 }
 
-export function getFileDiffText(oldStr, newStr, file_path) {
+export async function getFileDiffText(oldStr, newStr, file_path) {
+	const Diff = await import('diff');
 	return Diff.createPatch(file_path, oldStr || '', newStr || '', '', '', {
 		context: 3
 	});

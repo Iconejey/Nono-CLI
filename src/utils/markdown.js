@@ -1,6 +1,4 @@
-import prettier from 'prettier';
-import cliHighlight from 'cli-highlight';
-import { custom_theme } from './theme.js';
+import { getCustomTheme } from './theme.js';
 import { processInlineStyles, formatTable } from './terminal.js';
 
 const languageToParser = {
@@ -108,6 +106,8 @@ export async function formatCodeWithPrettier(code, lang) {
 
 export async function formatMarkdownForTerminal(md, options = {}) {
 	if (!md) return '';
+	const cliHighlight = (await import('cli-highlight')).default;
+	const custom_theme = await getCustomTheme();
 	const is_gray = options?.color === 'gray' || options?.gray;
 	const resetStyle = is_gray ? '\x1b[0m\x1b[90m' : '\x1b[0m';
 	const base_color = is_gray ? '\x1b[90m' : '';
@@ -218,6 +218,8 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 
 export async function highlightRawMarkdown(md) {
 	if (!md) return '';
+	const cliHighlight = (await import('cli-highlight')).default;
+	const custom_theme = await getCustomTheme();
 	const lines = md.split('\n');
 	const output_lines = [];
 	let in_code_block = false;

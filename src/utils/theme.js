@@ -1,10 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import cliHighlight from 'cli-highlight';
 import { writeDetails } from './logger.js';
 
-export function loadCustomTheme() {
+export function loadCustomTheme(cliHighlight) {
 	let theme_json_str = '';
 
 	// 1. Check if NONO_THEME is set in the environment
@@ -67,4 +66,10 @@ export function loadCustomTheme() {
 	return undefined;
 }
 
-export const custom_theme = loadCustomTheme();
+export let custom_theme = null;
+export async function getCustomTheme() {
+	if (custom_theme) return custom_theme;
+	const cliHighlight = (await import('cli-highlight')).default;
+	custom_theme = loadCustomTheme(cliHighlight);
+	return custom_theme;
+}

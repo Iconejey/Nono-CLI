@@ -7,15 +7,10 @@ import { fileURLToPath } from 'url';
 import { exec, execSync, spawn, spawnSync } from 'child_process';
 import readline from 'readline';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
-import OpenAI from 'openai';
-import cliHighlight from 'cli-highlight';
-import prettier from 'prettier';
-import * as Diff from 'diff';
 import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
 import { writeDetails, getDetailsPath, setDetailsPath, logTokenUsage } from './src/utils/logger.js';
-import { loadCustomTheme, custom_theme } from './src/utils/theme.js';
+import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
 import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
 import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
@@ -67,14 +62,31 @@ if (!use_vllm && !api_key && !['--details', '--usage', '--help', '-h', '--summar
 	process.exit(1);
 }
 
-const ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
+let ai = null;
+async function ensureAiInitialized() {
+	if (ai) return;
+	const { GoogleGenAI } = await import('@google/genai');
+	ai = api_key ? new GoogleGenAI({ apiKey: api_key }) : null;
+}
 
-const openai = use_vllm
-	? new OpenAI({
-			apiKey: vllm_api_key,
-			baseURL: vllm_base_url
-		})
-	: null;
+let openai = null;
+async function ensureOpenaiInitialized() {
+	if (openai) return;
+	const OpenAI = (await import('openai')).default;
+	openai = use_vllm
+		? new OpenAI({
+				apiKey: vllm_api_key,
+				baseURL: vllm_base_url
+			})
+		: null;
+}
+
+let cli_highlight = null;
+async function ensureCliHighlight() {
+	if (cli_highlight) return cli_highlight;
+	cli_highlight = (await import('cli-highlight')).default;
+	return cli_highlight;
+}
 
 let vllm_model_name = process.env.VLLM_MODEL || '';
 let vllm_max_context = 8192; // default fallback
@@ -95,6 +107,7 @@ const gemini_web_search_declaration = {
 };
 
 async function geminiWebSearch({ query }) {
+	await ensureAiInitialized();
 	if (!ai) return { error: 'Gemini API client not initialized.' };
 	try {
 		const response = await ai.models.generateContent({
@@ -284,6 +297,8 @@ process.stderr.write = function (chunk, encoding, callback) {
 
 // Helper to run a sub-agent for summarizing massive tool output
 async function runSummarizationSubAgent(originalResult, query) {
+	if (use_vllm) await ensureOpenaiInitialized();
+	else await ensureAiInitialized();
 	if (!ai && !openai) {
 		return 'Error: AI client not initialized.';
 	}
@@ -324,6 +339,8 @@ Please return a concise, targeted summary or extraction of the relevant parts th
 
 // Helper for background summarization process
 async function handleBackgroundSummarization(session_path) {
+	if (use_vllm) await ensureVllmInitialized();
+	else await ensureAiInitialized();
 	if (!fs.existsSync(session_path)) return;
 	let history = [];
 	let l_before = 0;
@@ -407,6 +424,8 @@ async function handleBackgroundSummarization(session_path) {
 }
 
 async function ensureContextLimit(history, session_path) {
+	if (use_vllm) await ensureOpenaiInitialized();
+	else await ensureAiInitialized();
 	if (!history || history.length === 0 || !(ai || openai)) return;
 	try {
 		let total_tokens = latest_context_size || 0;
@@ -1212,30 +1231,42 @@ if (nonoFiles.length > 0) {
 // Main Agentic Loop Orchestrator
 // ----------------------------------------------------
 
-async function main() {
-	if (use_vllm && vllm_stat_url) {
-		fetchVllmStatsLoop();
-	}
-	if (use_vllm && openai) {
+let vllm_initialized = false;
+async function ensureVllmInitialized() {
+	if (!use_vllm || vllm_initialized) return;
+	vllm_initialized = true;
+
+	if (vllm_stat_url) fetchVllmStatsLoop();
+
+	await ensureOpenaiInitialized();
+	if (openai) {
 		try {
 			const models = await openai.models.list();
 			if (models.data && models.data.length > 0) {
-				if (!vllm_model_name) {
-					vllm_model_name = models.data[0].id;
-				}
+				if (!vllm_model_name) vllm_model_name = models.data[0].id;
 				const matchedModel = models.data.find(m => m.id === vllm_model_name) || models.data[0];
-				if (matchedModel && matchedModel.max_model_len) {
-					vllm_max_context = matchedModel.max_model_len;
-				}
+				if (matchedModel && matchedModel.max_model_len) vllm_max_context = matchedModel.max_model_len;
 			}
 		} catch (e) {
 			// silent fallback
 		}
 		if (!vllm_model_name) vllm_model_name = 'default-model';
-	} else {
+	}
+}
+
+async function main() {
+	if (!use_vllm) {
 		if (process.argv[2] !== '--summarize-background' && !['--details', '--usage', '--help', '-h', '--clear', '--resume', '--list-instructions', '--add-instructions', '--get-pricing'].includes(process.argv[2])) {
 			console.warn('\x1b[33mWarning: The Gemini API will be used for the current task.\x1b[0m');
 		}
+	}
+
+	const skip_vllm_init_args = ['--help', '-h', '--clear', '--list-instructions', '--add-instructions', '--get-pricing', '--usage', '--details', '--write', '-w', '--resume', '--summarize-background'];
+	const is_skip_init = skip_vllm_init_args.includes(process.argv[2]);
+
+	if (!is_skip_init) {
+		if (use_vllm) await ensureVllmInitialized();
+		else await ensureAiInitialized();
 	}
 
 	const cache_dir = path.join(os.homedir(), '.cache', 'nono');
@@ -3006,6 +3037,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				console.log('No prompt provided. Exiting.');
 				process.exit(0);
 			}
+			if (use_vllm) await ensureVllmInitialized();
+			else await ensureAiInitialized();
 			let printedPrompt = user_query.trim();
 			try {
 				printedPrompt = await formatMarkdownForTerminal(printedPrompt);
