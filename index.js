@@ -139,6 +139,35 @@ let latest_vllm_stats = null;
 const original_stdout_write = process.stdout.write.bind(process.stdout);
 const original_stderr_write = process.stderr.write.bind(process.stderr);
 
+function getVllmServiceData(statsObj) {
+	if (!statsObj) return null;
+	if (statsObj.vllm) return statsObj.vllm;
+
+	if (statsObj.services && Array.isArray(statsObj.services)) {
+		let service = null;
+		if (vllm_base_url) {
+			try {
+				const parsed = new URL(vllm_base_url);
+				if (parsed.port) {
+					const targetPort = parseInt(parsed.port, 10);
+					service = statsObj.services.find(s => parseInt(s.port, 10) === targetPort);
+				}
+			} catch (e) {}
+		}
+		if (!service) {
+			service = statsObj.services.find(s => s.metrics?.status === 'online') || statsObj.services[0];
+		}
+		if (service) {
+			return {
+				generation_tokens_total: service.metrics?.generation_tokens_total,
+				current_context_tokens_total: service.metrics?.current_context_tokens_total,
+				max_model_len: parseInt(service.parameters?.max_model_len || service.vllm_arguments?.max_model_len || service.metrics?.max_context_tokens_gpu, 10) || null
+			};
+		}
+	}
+	return null;
+}
+
 async function fetchVllmStatsLoop() {
 	if (!use_vllm || !vllm_stat_url) return;
 	while (true) {
@@ -149,16 +178,17 @@ async function fetchVllmStatsLoop() {
 			clearTimeout(timeout_id);
 			if (res.ok) {
 				latest_vllm_stats = await res.json();
-				if (is_talking_active && latest_vllm_stats?.vllm && latest_vllm_stats.vllm.generation_tokens_total !== undefined) {
+				const vllmData = getVllmServiceData(latest_vllm_stats);
+				if (is_talking_active && vllmData && vllmData.generation_tokens_total !== undefined) {
 					if (vllm_baseline_generation === null) {
-						vllm_baseline_generation = latest_vllm_stats.vllm.generation_tokens_total;
+						vllm_baseline_generation = vllmData.generation_tokens_total;
 					}
-					talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
+					talking_token_count = Math.max(0, vllmData.generation_tokens_total - vllm_baseline_generation);
 					if (talking_token_count > 0 && vllm_ttft === null && vllm_request_start_time !== null) {
 						vllm_ttft = (Date.now() - vllm_request_start_time) / 1000;
 					}
 
-					const current_tokens = latest_vllm_stats.vllm.generation_tokens_total;
+					const current_tokens = vllmData.generation_tokens_total;
 					const current_time = Date.now();
 					if (last_vllm_tokens !== null && last_vllm_time !== null) {
 						const delta_tokens = current_tokens - last_vllm_tokens;
@@ -204,14 +234,15 @@ function drawBottomLine() {
 	let current_tokens = latest_context_size || 0;
 	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
 
-	if (use_vllm && latest_vllm_stats?.vllm) {
-		current_tokens = latest_vllm_stats.vllm.current_context_tokens_total || latest_context_size || 0;
-		token_limit = latest_vllm_stats.vllm.max_model_len || token_limit;
-		if (is_talking_active && latest_vllm_stats.vllm.generation_tokens_total !== undefined) {
+	const vllmData = getVllmServiceData(latest_vllm_stats);
+	if (use_vllm && vllmData) {
+		current_tokens = vllmData.current_context_tokens_total || latest_context_size || 0;
+		token_limit = vllmData.max_model_len || token_limit;
+		if (is_talking_active && vllmData.generation_tokens_total !== undefined) {
 			if (vllm_baseline_generation === null) {
-				vllm_baseline_generation = latest_vllm_stats.vllm.generation_tokens_total;
+				vllm_baseline_generation = vllmData.generation_tokens_total;
 			}
-			talking_token_count = Math.max(0, latest_vllm_stats.vllm.generation_tokens_total - vllm_baseline_generation);
+			talking_token_count = Math.max(0, vllmData.generation_tokens_total - vllm_baseline_generation);
 			if (talking_token_count > 0 && vllm_ttft === null && vllm_request_start_time !== null) {
 				vllm_ttft = (Date.now() - vllm_request_start_time) / 1000;
 			}
@@ -231,8 +262,9 @@ function drawBottomLine() {
 		}
 		if (latest_vllm_stats.gpus && Array.isArray(latest_vllm_stats.gpus)) {
 			latest_vllm_stats.gpus.forEach(gpu => {
-				if (gpu.temperature_celsius >= 80) {
-					hot_devices.push(`GPU${gpu.index} ${Math.round(gpu.temperature_celsius)}°C`);
+				const temp = gpu.temperature !== undefined ? gpu.temperature : gpu.temperature_celsius;
+				if (temp !== undefined && temp >= 80) {
+					hot_devices.push(`GPU${gpu.index} ${Math.round(temp)}°C`);
 				}
 			});
 		}
@@ -3160,7 +3192,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 						talking_token_count = 0;
 						latest_tok_speed = 0;
 						vllm_start_time = null;
-						vllm_baseline_generation = latest_vllm_stats?.vllm?.generation_tokens_total !== undefined ? latest_vllm_stats.vllm.generation_tokens_total : null;
+						const vllmData = getVllmServiceData(latest_vllm_stats);
+						vllm_baseline_generation = vllmData?.generation_tokens_total !== undefined ? vllmData.generation_tokens_total : null;
 						current_tool_being_called = null;
 
 						vllm_request_start_time = Date.now();
@@ -3552,7 +3585,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					writeDetails(`[Loop Nudge] Model did not call any tools. Nudging to continue.`);
 					history.push({
 						role: 'user',
-						parts: [{ text: 'Please continue the task using the appropriate tools. If you are completely done, you MUST call the "final_answer" tool with your final response.' }]
+						parts: [
+							{
+								text: 'Please continue the task using the appropriate tools. If you are completely done, you MUST call the "final_answer" tool with your final response.'
+							}
+						]
 					});
 					pruneHistory(history);
 					fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
@@ -3771,13 +3808,21 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							console.log(`\n\x1b[31m• PR review submission failed. Please verify your connection, credentials, or GITHUB_ACCESS_TOKEN in your .env file.\x1b[0m`);
 							await askUser('\x1b[33mPress Enter to retry sending the PR review...\x1b[0m', false);
 
-							dotenv.config({ path: path.join(process.cwd(), '.env'), quiet: true, override: true });
+							dotenv.config({
+								path: path.join(process.cwd(), '.env'),
+								quiet: true,
+								override: true
+							});
 							dotenv.config({
 								path: path.join(os.homedir(), '.config', 'nono', '.env'),
 								quiet: true,
 								override: true
 							});
-							dotenv.config({ path: path.join(dir_name, '.env'), quiet: true, override: true });
+							dotenv.config({
+								path: path.join(dir_name, '.env'),
+								quiet: true,
+								override: true
+							});
 						}
 					}
 				}
