@@ -1175,6 +1175,7 @@ CRITICAL INSTRUCTIONS:
 - Keep a clean context history. Use the appropriate tools to clean tool outputs that don't seem relevant or usefull anymore for the remaining of the task.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 - Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
+- Note that user sees tool calls but not tool outputs or thinking/plain generated text. If you want user to see something, put it in a comment of in the final answer.
 
 Guidelines:
 - Keep your final output concise and accurate.
