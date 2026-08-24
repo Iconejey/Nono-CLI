@@ -1176,6 +1176,7 @@ CRITICAL INSTRUCTIONS:
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 - Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
 - Note that user sees tool calls but not tool outputs or thinking/plain generated text. If you want user to see something, put it in a comment of in the final answer.
+- When the task is done, make sure to use the "final_answer" tool to show output and stop the ReAct loop.
 
 Guidelines:
 - Keep your final output concise and accurate.
