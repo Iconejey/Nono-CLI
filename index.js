@@ -2868,7 +2868,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					}
 				}
 				const cleanPromptText = (currentPrompt || '').split('\n\n[')[0].split('\n[')[0].trim();
-				logTokenUsage(model_name, response.usageMetadata, cleanPromptText);
 			}
 
 			const candidate = response.candidates?.[0];
