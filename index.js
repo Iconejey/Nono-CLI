@@ -1307,21 +1307,6 @@ async function main() {
 		fs.mkdirSync(cache_dir, { recursive: true });
 	}
 
-	let auto_continue = false;
-	const envAutoContinue = process.env.NONO_AUTO_CONTINUE;
-	if (envAutoContinue) {
-		const lowered = envAutoContinue.trim().toLowerCase();
-		if (lowered === 'true' || lowered === 'yes' || lowered === '1') {
-			auto_continue = true;
-		}
-	}
-
-	const autoContinueIdx = process.argv.findIndex((arg, i) => i >= 2 && (arg === '-ac' || arg === '--auto-continue'));
-	if (autoContinueIdx !== -1) {
-		auto_continue = true;
-		process.argv.splice(autoContinueIdx, 1);
-	}
-
 	// Clean up old nono-pr- directories in tmp (older than 2 hours)
 	try {
 		const files = fs.readdirSync(os.tmpdir());
@@ -1402,7 +1387,7 @@ async function main() {
   nono --details             Open the logs and details of the current session in VS Code
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
   nono --raw                 Print the last final message in raw markdown with syntax highlighting
-  nono --auto-continue, -ac  Auto-send "continue" on "Task completed" up to 3 times (or set NONO_AUTO_CONTINUE=true)
+  
   nono --help, -h            Show this help information
 `);
 		process.exit(0);
@@ -2678,7 +2663,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	let pendingSummaryTriggers = [];
 	const grounding_sources = [];
 	const web_search_queries = [];
-	let autoContinueCount = 0;
+
 	reactLoop: while (true) {
 		try {
 			let response;
