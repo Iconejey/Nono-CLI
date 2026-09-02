@@ -65,9 +65,9 @@ Once linked, you can invoke Nono using the `nono` command:
 nono Find all files importing dotenv and list them
 
 # If you are strugling with special characters in your prompt, like quotes,
-# you can simply run nono without arguments and type your prompt after
+# you can simply run nono without arguments which opens a temp file in your
+# text editor (vim, nano...) to write your prompt
 nono
-> Find all files importing "dotenv" and list them
 
 # Open the logs and detailed history of the current session in VS Code
 nono --details
@@ -80,11 +80,6 @@ nono --clear
 
 # Fetch latest pricing for the active model online and update configuration
 nono --get-pricing
-
-# Open a temp file in your text editor to write a prompt and execute it on save and exit
-nono --write
-# Or using the shorthand flag
-nono -w
 
 # Include whole or parts of a file (optional line range) as context
 nono --file path/to/file.js:10-20 "Please explain this range"
@@ -120,7 +115,7 @@ Place these in your `.env` files (checked at `./.env`, the script directory's `.
 | `NONO_PRICE_INPUT_PER_M`      | Custom input token price per million (for cost calculations).                 | `1.38`             |
 | `NONO_PRICE_OUTPUT_PER_M`     | Custom output token price per million (for cost calculations).                | `8.28`             |
 | `NONO_PRICE_CACHE_PER_M`      | Custom cache read token price per million (for cost calculations).            | `0.138`            |
-| `NONO_EDITOR`                 | Force a terminal editor for the write prompt command (e.g. `vim`, `nano`).    | None               |
+| `NONO_EDITOR`                 | Force a terminal editor for the prompt editor (e.g. `vim`, `nano`).           | None               |
 
 ### Custom Styling & Themes
 

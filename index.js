@@ -1294,7 +1294,7 @@ async function main() {
 		}
 	}
 
-	const skip_vllm_init_args = ['--help', '-h', '--clear', '--list-instructions', '--add-instructions', '--get-pricing', '--usage', '--details', '--write', '-w', '--resume', '--summarize-background'];
+	const skip_vllm_init_args = ['--help', '-h', '--clear', '--list-instructions', '--add-instructions', '--get-pricing', '--usage', '--details', '--resume', '--summarize-background'];
 	const is_skip_init = skip_vllm_init_args.includes(process.argv[2]);
 
 	if (!is_skip_init) {
@@ -1387,9 +1387,8 @@ async function main() {
 \x1b[35m✦ Nono - Ultra-efficient CLI AI Agent & Coding\x1b[0m
 
 \x1b[1mUsage:\x1b[0m
-  nono                       Start Nono in interactive mode
+  nono                       Write a prompt in your text editor
   nono [prompt]              Run a prompt directly from the command line
-  nono --write, -w           Open a temp file in your text editor to write a prompt
   nono --vscode, -vs         Retrieve VSCode selection and use it as context with its file path
   nono --file, -f <spec>     Include whole/parts of a text file (spec: path[:line] or path[:start_line-end_line])
   nono --clipboard, -c       Include the copied text in clipboard
@@ -2985,10 +2984,16 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			clipboard_context = `\n\n[Clipboard Context]\n\`\`\`${codeBlockLang}\n${clipboardText.trim()}\n\`\`\``;
 		}
 
-		if (process.argv[2] === '--write' || process.argv[2] === '-w') {
-			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_temp.txt`);
+		const promptArgs = process.argv.slice(2).join(' ');
+		if (!promptArgs.trim()) {
+			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_prompt.md`);
+			const cwd = process.cwd();
+			const editorHeader = `<!-- Current directory: ${cwd}
+Type your prompt below :
+-->
+`;
 			try {
-				fs.writeFileSync(tempPath, '', 'utf8');
+				fs.writeFileSync(tempPath, editorHeader, 'utf8');
 				await new Promise((resolve, reject) => {
 					const editors = [];
 					if (process.env.NONO_EDITOR) {
@@ -3047,7 +3052,10 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					trySpawn();
 				});
 				if (fs.existsSync(tempPath)) {
-					user_query = fs.readFileSync(tempPath, 'utf8');
+					let rawQuery = fs.readFileSync(tempPath, 'utf8');
+					// Strip the HTML comment header injected by the editor
+					rawQuery = rawQuery.replace(/^<!-- Current directory: .*\nType your prompt below :\n-->\n?/s, '');
+					user_query = rawQuery.trim();
 					try {
 						fs.unlinkSync(tempPath);
 					} catch (e) {
@@ -3078,16 +3086,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			} catch (e) {}
 			console.log(`\x1b[35m>\x1b[0m ${printedPrompt}\n`);
 		} else {
-			user_query = process.argv.slice(2).join(' ');
-
-			// If no arguments, prompt interactively
-			if (!user_query.trim()) {
-				user_query = await askUser('\x1b[35m> \x1b[0m', false);
-				if (!user_query.trim()) {
-					console.log('No prompt provided. Exiting.');
-					process.exit(0);
-				}
-			}
+			user_query = promptArgs;
 		}
 
 		let combined_context = '';
