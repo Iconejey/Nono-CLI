@@ -2986,14 +2986,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 		const promptArgs = process.argv.slice(2).join(' ');
 		if (!promptArgs.trim()) {
-			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_prompt.md`);
 			const cwd = process.cwd();
-			const editorHeader = `<!-- Current directory: ${cwd}
-Type your prompt below :
--->
-`;
+			const dirName = path.basename(cwd).replaceAll(' ', '_');
+			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_${dirName}.md`);
 			try {
-				fs.writeFileSync(tempPath, editorHeader, 'utf8');
+				fs.writeFileSync(tempPath, '', 'utf8');
 				await new Promise((resolve, reject) => {
 					const editors = [];
 					if (process.env.NONO_EDITOR) {
