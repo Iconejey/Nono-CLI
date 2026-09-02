@@ -9,7 +9,7 @@ import readline from 'readline';
 import dotenv from 'dotenv';
 import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
-import { writeDetails, getDetailsPath, setDetailsPath, logTokenUsage } from './src/utils/logger.js';
+import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
 import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
 import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
@@ -56,7 +56,7 @@ const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 export const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
 
-if (!use_vllm && !api_key && !['--details', '--usage', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
+if (!use_vllm && !api_key && !['--details', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
 	console.error('Please configure your GEMINI_API_KEY in a .env file.');
 	process.exit(1);
@@ -1289,12 +1289,12 @@ async function ensureVllmInitialized() {
 
 async function main() {
 	if (!use_vllm) {
-		if (process.argv[2] !== '--summarize-background' && !['--details', '--usage', '--help', '-h', '--clear', '--resume', '--list-instructions', '--add-instructions', '--get-pricing'].includes(process.argv[2])) {
+		if (process.argv[2] !== '--summarize-background' && !['--details', '--help', '-h', '--clear', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 			console.warn('\x1b[33mWarning: The Gemini API will be used for the current task.\x1b[0m');
 		}
 	}
 
-	const skip_vllm_init_args = ['--help', '-h', '--clear', '--list-instructions', '--add-instructions', '--get-pricing', '--usage', '--details', '--resume', '--summarize-background'];
+	const skip_vllm_init_args = ['--help', '-h', '--clear', '--list-instructions', '--add-instructions', '--details', '--resume', '--summarize-background'];
 	const is_skip_init = skip_vllm_init_args.includes(process.argv[2]);
 
 	if (!is_skip_init) {
@@ -1392,7 +1392,6 @@ async function main() {
   nono --vscode, -vs         Retrieve VSCode selection and use it as context with its file path
   nono --file, -f <spec>     Include whole/parts of a text file (spec: path[:line] or path[:start_line-end_line])
   nono --clipboard, -c       Include the copied text in clipboard
-  nono --usage               Display token consumption and estimated costs (use --list <n> or -l <n> to list last prompts)
   nono --clear               Clear terminal screen, scrollback, and current session history
   nono --resume              List and interactively select previous session context to resume
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
@@ -1401,7 +1400,6 @@ async function main() {
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
   nono --details             Open the logs and details of the current session in VS Code
-  nono --get-pricing         Retrieve model pricing from web search and update configuration
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
   nono --raw                 Print the last final message in raw markdown with syntax highlighting
   nono --auto-continue, -ac  Auto-send "continue" on "Task completed" up to 3 times (or set NONO_AUTO_CONTINUE=true)
@@ -1451,173 +1449,8 @@ async function main() {
 		return;
 	}
 
-	// Handle nono --get-pricing command
-	if (process.argv[2] === '--get-pricing') {
-		console.log('\x1b[35m✦ Fetching current pricing and country information...\x1b[0m\n');
-
-		const countryName = process.env.NONO_COUNTRY || 'France';
-
-		console.log(`Current Model: \x1b[36m${model_name}\x1b[0m`);
-		console.log(`Current Location: \x1b[36m${countryName}\x1b[0m`);
-		const currency = process.env.NONO_CURRENCY || '€';
-		console.log(`Currency: \x1b[36m${currency}\x1b[0m\n`);
-
-		console.log('• Querying Gemini API pricing details via Google Search...');
-
-		const pricingPrompt = `Use Google Search to find the latest developer pricing for the Gemini API model "${model_name}" (specifically input tokens, output tokens, and cached input tokens) ${countryName ? `for users in ${countryName}` : ''} in the currency "${currency}".
-
-Search for the official Google AI Studio/Gemini API pricing. Find:
-1. Input token price (per 1 million tokens)
-2. Output token price (per 1 million tokens)
-3. Cached input token price (per 1 million tokens)
-
-If the pricing is only listed in USD, convert it to ${currency} using the current exchange rate.
-
-Return ONLY a JSON object. Do not include markdown code block formatting (like \`\`\`json). The JSON object MUST have the following structure:
-{
-  "input_price_per_m": <number>,
-  "output_price_per_m": <number>,
-  "cache_price_per_m": <number>
-}`;
-
-		try {
-			const pricingResponse = await ai.models.generateContent({
-				model: model_name,
-				contents: [{ role: 'user', parts: [{ text: pricingPrompt }] }],
-				config: {
-					tools: [{ googleSearch: {} }]
-				}
-			});
-
-			let text = pricingResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
-			// Clean up potential markdown code blocks
-			text = text
-				.replace(/```json/gi, '')
-				.replace(/```/g, '')
-				.trim();
-
-			let newPricing;
-			try {
-				newPricing = JSON.parse(text);
-			} catch (parseErr) {
-				console.error('\x1b[31mError: Failed to parse pricing response from Gemini.\x1b[0m');
-				console.log('Raw response:');
-				console.log(text);
-				process.exit(1);
-			}
-
-			// Validate response fields
-			const newPriceInput = parseFloat(newPricing.input_price_per_m);
-			const newPriceOutput = parseFloat(newPricing.output_price_per_m);
-			const newPriceCache = parseFloat(newPricing.cache_price_per_m);
-
-			if (isNaN(newPriceInput) || isNaN(newPriceOutput) || isNaN(newPriceCache)) {
-				console.error('\x1b[31mError: Pricing response did not return valid numeric values.\x1b[0m');
-				console.log(JSON.stringify(newPricing, null, 2));
-				process.exit(1);
-			}
-
-			// Current pricing from env (or fallbacks)
-			const currentPriceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
-			const currentPriceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
-			const currentPriceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
-
-			// Compare in a table
-			console.log('\n\x1b[35m=== Pricing Comparison (per 1 Million Tokens) ===\x1b[0m');
-			console.log(`Token Type          │ Current Price │ New Found Price`);
-			console.log(`────────────────────┼───────────────┼─────────────────`);
-
-			const pad = (str, length) => str + ' '.repeat(Math.max(0, length - String(str).length));
-			const padLeft = (str, length) => ' '.repeat(Math.max(0, length - String(str).length)) + str;
-
-			console.log(`${pad('Input (non-cached)', 19)} │ ${padLeft(`${currentPriceInput.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceInput.toFixed(2)}${currency}`, 15)}`);
-			console.log(`${pad('Cache Hit', 19)} │ ${padLeft(`${currentPriceCache.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceCache.toFixed(2)}${currency}`, 15)}`);
-			console.log(`${pad('Output', 19)} │ ${padLeft(`${currentPriceOutput.toFixed(2)}${currency}`, 13)} │ ${padLeft(`${newPriceOutput.toFixed(2)}${currency}`, 15)}`);
-			console.log(`────────────────────┴───────────────┴─────────────────`);
-
-			// Prompt the user
-			const answer = await askUser('\nDo you want to update the pricing values? [y/N]: ');
-			const norm = answer.trim().toLowerCase();
-			if (norm === 'y' || norm === 'yes') {
-				const localEnvPath = path.join(process.cwd(), '.env');
-				const configEnvPath = path.join(os.homedir(), '.config', 'nono', '.env');
-				const scriptEnvPath = path.join(dir_name, '.env');
-
-				let targetEnvPath = '';
-				if (fs.existsSync(localEnvPath)) {
-					targetEnvPath = localEnvPath;
-				} else if (fs.existsSync(configEnvPath)) {
-					targetEnvPath = configEnvPath;
-				} else {
-					targetEnvPath = scriptEnvPath;
-				}
-
-				console.log(`Updating configuration in: ${targetEnvPath}...`);
-
-				let envContent = '';
-				if (fs.existsSync(targetEnvPath)) {
-					envContent = fs.readFileSync(targetEnvPath, 'utf8');
-				}
-
-				const lines = envContent.split(/\r?\n/);
-				const keysToUpdate = {
-					NONO_PRICE_INPUT_PER_M: newPriceInput.toString(),
-					NONO_PRICE_OUTPUT_PER_M: newPriceOutput.toString(),
-					NONO_PRICE_CACHE_PER_M: newPriceCache.toString()
-				};
-
-				const keysToRemove = ['NONO_PRICE_INPUT_EUR_PER_M', 'NONO_PRICE_OUTPUT_EUR_PER_M', 'NONO_PRICE_CACHE_EUR_PER_M'];
-
-				let updatedLines = [];
-				const processedKeys = new Set();
-
-				for (let line of lines) {
-					const trimmed = line.trim();
-					if (trimmed.startsWith('#') || trimmed === '') {
-						updatedLines.push(line);
-						continue;
-					}
-					const eqIdx = trimmed.indexOf('=');
-					if (eqIdx !== -1) {
-						const key = trimmed.slice(0, eqIdx).trim();
-						if (keysToRemove.includes(key)) {
-							continue;
-						}
-						if (keysToUpdate[key] !== undefined) {
-							updatedLines.push(`${key}=${keysToUpdate[key]}`);
-							processedKeys.add(key);
-						} else {
-							updatedLines.push(line);
-						}
-					} else {
-						updatedLines.push(line);
-					}
-				}
-
-				for (const [key, val] of Object.entries(keysToUpdate)) {
-					if (!processedKeys.has(key)) {
-						updatedLines.push(`${key}=${val}`);
-					}
-				}
-
-				fs.writeFileSync(targetEnvPath, updatedLines.join('\n'), 'utf8');
-				console.log('\x1b[32m✔ Pricing values updated successfully in .env file!\x1b[0m\n');
-			} else {
-				console.log('Update cancelled. Pricing kept unchanged.');
-			}
-		} catch (err) {
-			console.error(`\x1b[31mError during pricing lookup: ${err.message || err}\x1b[0m`);
-			process.exit(1);
-		}
-		process.exit(0);
-		return;
-	}
-
 	// Handle nono --clear argument
 	if (process.argv[2] === '--clear') {
-		// Clear terminal screen and scrollback
-		process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
-
 		// Delete session and details files for current session
 		const session_path = path.join(cache_dir, `session-${process.ppid}.json`);
 		const session_pr_path = path.join(cache_dir, `session-pr-${process.ppid}.json`);
@@ -1927,328 +1760,6 @@ fix: resolve null pointer exception in checkout flow`;
 
 		process.exit(0);
 		return;
-	}
-
-	// Handle nono --usage argument
-	if (process.argv[2] === '--usage') {
-		const log_file = path.join(cache_dir, 'consumption.json');
-		if (!fs.existsSync(log_file)) {
-			console.log('No usage yet');
-			process.exit(0);
-		}
-		let logs = [];
-		try {
-			logs = JSON.parse(fs.readFileSync(log_file, 'utf8'));
-		} catch (e) {
-			console.log('No usage yet');
-			process.exit(0);
-		}
-		if (logs.length === 0) {
-			console.log('No usage yet');
-			process.exit(0);
-		}
-
-		let listCount = null;
-		const listIdx = process.argv.findIndex(arg => arg === '--list' || arg === '-l');
-		if (listIdx !== -1) {
-			listCount = 10;
-			if (listIdx < process.argv.length - 1) {
-				const count = parseInt(process.argv[listIdx + 1], 10);
-				if (!isNaN(count) && count > 0) {
-					listCount = count;
-				}
-			}
-		}
-
-		if (listCount !== null) {
-			const currency = process.env.NONO_CURRENCY || '€';
-			const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
-			const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
-			const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
-
-			// Group logs by run (pid) or contiguous timestamps (legacy)
-			const groupedLogs = [];
-			let currentGroup = null;
-
-			for (const log of logs) {
-				const hasPid = typeof log.pid === 'number';
-				const logTime = new Date(log.timestamp).getTime();
-
-				let shouldGroup = false;
-
-				if (currentGroup) {
-					if (hasPid && currentGroup.pid === log.pid) {
-						shouldGroup = true;
-					} else if (!hasPid && !currentGroup.pid && currentGroup.ppid === log.ppid) {
-						const groupTime = new Date(currentGroup.timestamp).getTime();
-						if (Math.abs(logTime - groupTime) < 300000) {
-							shouldGroup = true;
-						}
-					}
-				}
-
-				if (shouldGroup && currentGroup) {
-					currentGroup.promptTokenCount += log.promptTokenCount || 0;
-					currentGroup.candidatesTokenCount += log.candidatesTokenCount || 0;
-					currentGroup.cachedContentTokenCount += log.cachedContentTokenCount || 0;
-					if (!currentGroup.prompt && log.prompt) {
-						currentGroup.prompt = log.prompt;
-					}
-				} else {
-					currentGroup = {
-						timestamp: log.timestamp,
-						ppid: log.ppid,
-						pid: log.pid,
-						model: log.model,
-						promptTokenCount: log.promptTokenCount || 0,
-						candidatesTokenCount: log.candidatesTokenCount || 0,
-						cachedContentTokenCount: log.cachedContentTokenCount || 0,
-						prompt: log.prompt || ''
-					};
-					groupedLogs.push(currentGroup);
-				}
-			}
-
-			const lastLogs = groupedLogs.slice(-listCount);
-
-			console.log(`\n\x1b[35m=== Last ${lastLogs.length} Prompts Cost ===\x1b[0m\n`);
-
-			const headers = ['Day Time', 'Prompt (truncated to 60 chars)', 'Cost'];
-			const colWidths = [19, 60, 10];
-
-			const pad = (str, length, align = 'left') => {
-				str = String(str);
-				if (str.length >= length) return str.slice(0, length);
-				const diff = length - str.length;
-				if (align === 'right') {
-					return ' '.repeat(diff) + str;
-				}
-				return str + ' '.repeat(diff);
-			};
-
-			const headerStr = pad(headers[0], colWidths[0], 'left') + ' | ' + pad(headers[1], colWidths[1], 'left') + ' | ' + pad(headers[2], colWidths[2], 'right');
-			console.log(`\x1b[1;37m${headerStr}\x1b[0m`);
-
-			const separator = '─'.repeat(colWidths[0]) + '─+─' + '─'.repeat(colWidths[1]) + '─+─' + '─'.repeat(colWidths[2]);
-			console.log(`\x1b[90m${separator}\x1b[0m`);
-
-			let totalCostSum = 0;
-
-			for (const log of lastLogs) {
-				const d = new Date(log.timestamp);
-				const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-
-				const inputVal = (log.promptTokenCount || 0) - (log.cachedContentTokenCount || 0);
-				const cacheVal = log.cachedContentTokenCount || 0;
-				const outputVal = log.candidatesTokenCount || 0;
-
-				const costInput = (inputVal * priceInput) / 1000000;
-				const costCache = (cacheVal * priceCache) / 1000000;
-				const costOutput = (outputVal * priceOutput) / 1000000;
-				const totalCost = costInput + costCache + costOutput;
-
-				totalCostSum += totalCost;
-
-				let displayPrompt = log.prompt || '';
-				if (!displayPrompt) {
-					if (log.cachedContentTokenCount > 0 || log.promptTokenCount > 5000) {
-						const legacyPrName = getPRNameFromPPID(log.ppid);
-						displayPrompt = legacyPrName ? `PR review ${legacyPrName}` : 'PR review';
-					} else {
-						displayPrompt = `(${log.model || 'unknown model'})`;
-					}
-				}
-				displayPrompt = displayPrompt.replace(/\s+/g, ' ');
-				if (displayPrompt.length > colWidths[1]) {
-					displayPrompt = displayPrompt.slice(0, colWidths[1] - 3) + '...';
-				}
-
-				const formattedCost = `${totalCost.toFixed(2)}${currency}`;
-
-				const line = pad(dateStr, colWidths[0], 'left') + ' | ' + pad(displayPrompt, colWidths[1], 'left') + ' | ' + pad(formattedCost, colWidths[2], 'right');
-				console.log(line);
-			}
-
-			console.log(`\x1b[90m${separator}\x1b[0m`);
-
-			const totalCostStr = `${totalCostSum.toFixed(2)}${currency}`;
-			const totalLine = pad('Total', colWidths[0], 'left') + ' | ' + pad('-', colWidths[1], 'left') + ' | ' + pad(totalCostStr, colWidths[2], 'right');
-			console.log(`\x1b[1m${totalLine}\x1b[0m\n`);
-
-			process.exit(0);
-		}
-
-		const currency = process.env.NONO_CURRENCY || '€';
-		const priceInput = parseFloat(process.env.NONO_PRICE_INPUT_PER_M || process.env.NONO_PRICE_INPUT_EUR_PER_M) || 1.38;
-		const priceOutput = parseFloat(process.env.NONO_PRICE_OUTPUT_PER_M || process.env.NONO_PRICE_OUTPUT_EUR_PER_M) || 8.28;
-		const priceCache = parseFloat(process.env.NONO_PRICE_CACHE_PER_M || process.env.NONO_PRICE_CACHE_EUR_PER_M) || 0.138;
-
-		let sessionInput = 0;
-		let sessionCache = 0;
-		let sessionOutput = 0;
-
-		let monthInput = 0;
-		let monthCache = 0;
-		let monthOutput = 0;
-
-		const now = new Date();
-		const year = now.getFullYear();
-		const month = now.getMonth();
-
-		const startOfMonth = new Date(year, month, 1);
-		const nextMonth = new Date(year, month + 1, 1);
-		const elapsedFraction = Math.max(0.0001, (now - startOfMonth) / (nextMonth - startOfMonth));
-
-		for (const log of logs) {
-			const logDate = new Date(log.timestamp);
-			const isInCurrentMonth = logDate.getFullYear() === year && logDate.getMonth() === month;
-
-			const inputVal = (log.promptTokenCount || 0) - (log.cachedContentTokenCount || 0);
-			const cacheVal = log.cachedContentTokenCount || 0;
-			const outputVal = log.candidatesTokenCount || 0;
-
-			if (log.ppid === process.ppid) {
-				sessionInput += inputVal;
-				sessionCache += cacheVal;
-				sessionOutput += outputVal;
-			}
-
-			if (isInCurrentMonth) {
-				monthInput += inputVal;
-				monthCache += cacheVal;
-				monthOutput += outputVal;
-			}
-		}
-
-		// Helper to pad strings for alignment
-		const pad = (str, length, align = 'left') => {
-			str = String(str);
-			if (str.length >= length) return str;
-			const diff = length - str.length;
-			if (align === 'right') {
-				return ' '.repeat(diff) + str;
-			}
-			return str + ' '.repeat(diff);
-		};
-
-		const sessionCostInput = (sessionInput * priceInput) / 1000000;
-		const sessionCostCache = (sessionCache * priceCache) / 1000000;
-		const sessionCostOutput = (sessionOutput * priceOutput) / 1000000;
-		const sessionTotalCost = sessionCostInput + sessionCostCache + sessionCostOutput;
-		const sessionTotalTokens = sessionInput + sessionCache + sessionOutput;
-
-		const monthCostInput = (monthInput * priceInput) / 1000000;
-		const monthCostCache = (monthCache * priceCache) / 1000000;
-		const monthCostOutput = (monthOutput * priceOutput) / 1000000;
-		const monthTotalCost = monthCostInput + monthCostCache + monthCostOutput;
-		const monthTotalTokens = monthInput + monthCache + monthOutput;
-
-		const projectedCostInput = monthCostInput / elapsedFraction;
-		const projectedCostCache = monthCostCache / elapsedFraction;
-		const projectedCostOutput = monthCostOutput / elapsedFraction;
-		const projectedTotalCost = monthTotalCost / elapsedFraction;
-
-		console.log(`\n\x1b[35m=== Nono Token Consumption & Costs ===\x1b[0m`);
-		console.log(`Active Model: ${model_name}`);
-		console.log(`Month elapsed: ${(elapsedFraction * 100).toFixed(2)}%\n`);
-
-		// ----------------------------------------------------
-		// 1. Session Consumption Table
-		// ----------------------------------------------------
-		console.log(`\x1b[1;35m✦ Session Consumption (PPID: ${process.ppid})\x1b[0m`);
-
-		const headers1 = ['Token Type', 'Price / 1M', 'Tokens', 'Estimated Cost'];
-		const colWidths1 = [20, 12, 14, 16];
-
-		// Print Headers
-		const headerStr1 = pad(headers1[0], colWidths1[0], 'left') + ' │ ' + pad(headers1[1], colWidths1[1], 'right') + ' │ ' + pad(headers1[2], colWidths1[2], 'right') + ' │ ' + pad(headers1[3], colWidths1[3], 'right');
-		console.log(`\x1b[1;37m${headerStr1}\x1b[0m`);
-
-		// Print Separator
-		const separator1 = '─'.repeat(colWidths1[0]) + '─┼─' + '─'.repeat(colWidths1[1]) + '─┼─' + '─'.repeat(colWidths1[2]) + '─┼─' + '─'.repeat(colWidths1[3]);
-		console.log(`\x1b[90m${separator1}\x1b[0m`);
-
-		const printRow1 = (label, priceStr, tokens, cost) => {
-			const formattedTokens = tokens.toLocaleString();
-			const formattedCost = label === 'Total' ? `${cost.toFixed(2)}${currency}` : `${cost.toFixed(2)}${currency}`;
-
-			const line = pad(label, colWidths1[0], 'left') + ' │ ' + pad(priceStr, colWidths1[1], 'right') + ' │ ' + pad(formattedTokens, colWidths1[2], 'right') + ' │ ' + pad(formattedCost, colWidths1[3], 'right');
-
-			if (label === 'Total') {
-				console.log(`\x1b[1m${line}\x1b[0m`);
-			} else {
-				console.log(line);
-			}
-		};
-
-		printRow1('Input (non-cached)', `${priceInput.toFixed(2)}${currency}`, sessionInput, sessionCostInput);
-		printRow1('Cache Hit', `${priceCache.toFixed(2)}${currency}`, sessionCache, sessionCostCache);
-		printRow1('Output', `${priceOutput.toFixed(2)}${currency}`, sessionOutput, sessionCostOutput);
-
-		console.log(`\x1b[90m${separator1}\x1b[0m`);
-		printRow1('Total', '-', sessionTotalTokens, sessionTotalCost);
-		console.log();
-
-		// ----------------------------------------------------
-		// 2. Monthly Consumption & Projections Table
-		// ----------------------------------------------------
-		const monthsList = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-		const monthName = monthsList[month];
-
-		console.log(`\x1b[1;35m✦ Monthly Consumption & Projections (${monthName} ${year})\x1b[0m`);
-
-		const headers2 = ['Token Type', 'Price / 1M', 'Month Tokens', 'Month Cost', 'Projected Cost'];
-		const colWidths2 = [20, 12, 14, 12, 16];
-
-		// Print Headers
-		const headerStr2 =
-			pad(headers2[0], colWidths2[0], 'left') +
-			' │ ' +
-			pad(headers2[1], colWidths2[1], 'right') +
-			' │ ' +
-			pad(headers2[2], colWidths2[2], 'right') +
-			' │ ' +
-			pad(headers2[3], colWidths2[3], 'right') +
-			' │ ' +
-			pad(headers2[4], colWidths2[4], 'right');
-		console.log(`\x1b[1;37m${headerStr2}\x1b[0m`);
-
-		// Print Separator
-		const separator2 = '─'.repeat(colWidths2[0]) + '─┼─' + '─'.repeat(colWidths2[1]) + '─┼─' + '─'.repeat(colWidths2[2]) + '─┼─' + '─'.repeat(colWidths2[3]) + '─┼─' + '─'.repeat(colWidths2[4]);
-		console.log(`\x1b[90m${separator2}\x1b[0m`);
-
-		const printRow2 = (label, priceStr, tokens, cost, projectedCost) => {
-			const formattedTokens = tokens.toLocaleString();
-			const formattedCost = `${cost.toFixed(2)}${currency}`;
-			const formattedProjected = `${projectedCost.toFixed(2)}${currency}`;
-
-			const line =
-				pad(label, colWidths2[0], 'left') +
-				' │ ' +
-				pad(priceStr, colWidths2[1], 'right') +
-				' │ ' +
-				pad(formattedTokens, colWidths2[2], 'right') +
-				' │ ' +
-				pad(formattedCost, colWidths2[3], 'right') +
-				' │ ' +
-				pad(formattedProjected, colWidths2[4], 'right');
-
-			if (label === 'Total') {
-				console.log(`\x1b[1m${line}\x1b[0m`);
-			} else {
-				console.log(line);
-			}
-		};
-
-		printRow2('Input (non-cached)', `${priceInput.toFixed(2)}${currency}`, monthInput, monthCostInput, projectedCostInput);
-		printRow2('Cache Hit', `${priceCache.toFixed(2)}${currency}`, monthCache, monthCostCache, projectedCostCache);
-		printRow2('Output', `${priceOutput.toFixed(2)}${currency}`, monthOutput, monthCostOutput, projectedCostOutput);
-
-		console.log(`\x1b[90m${separator2}\x1b[0m`);
-		printRow2('Total', '-', monthTotalTokens, monthTotalCost, projectedTotalCost);
-		console.log();
-
-		process.exit(0);
 	}
 
 	// Handle nono --details argument
