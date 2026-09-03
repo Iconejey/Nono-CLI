@@ -190,7 +190,7 @@ export function formatTable(table_lines, resetStyle = '\x1b[0m') {
 	}
 
 	const top_border = indent + '┌' + col_widths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
-	const separator_row = indent + '├' + col_widths.map(w => '─'.repeat(w + 2)).join('+') + '┤';
+	const separator_row = indent + '├' + col_widths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
 	const bottom_border = indent + '└' + col_widths.map(w => '─'.repeat(w + 2)).join('┴') + '┘';
 
 	const formatRow = processed_cells => {
