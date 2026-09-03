@@ -2288,32 +2288,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			console.log('\n\x1b[36m✦ VSCode Selected Text Detected:\x1b[0m');
-			if (detectedFile) {
-				const relativePath = path.relative(root || process.cwd(), detectedFile);
-				console.log(`  File: \x1b[33m${relativePath}\x1b[0m`);
-			} else {
-				console.log('  File: \x1b[90m(Not detected in workspace)\x1b[0m');
-			}
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
-
-			let highlighted;
-			if (detectedLang && cliHighlight.supportsLanguage(detectedLang)) {
-				try {
-					highlighted = cliHighlight.highlight(selectionText.trim(), {
-						language: detectedLang,
-						ignoreIllegals: true,
-						theme: custom_theme
-					});
-				} catch (e) {
-					highlighted = selectionText.trim();
-				}
-			} else {
-				highlighted = selectionText.trim();
-			}
-			console.log(highlighted);
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
-
 			vscode_context = `\n\n[VS Code Selection Context]\n`;
 			if (detectedFile) {
 				const relativePath = path.relative(root || process.cwd(), detectedFile);
@@ -2394,45 +2368,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			console.log(`\n\x1b[36m✦ File Context Detected:\x1b[0m`);
-			let lineRangeInfo = '';
-			if (startLine !== null && endLine !== null) {
-				if (startLine === endLine) {
-					lineRangeInfo = ` (Line ${startLine})`;
-				} else {
-					lineRangeInfo = ` (Lines ${startLine}-${endLine})`;
-				}
-			}
-			console.log(`  File: \x1b[33m${filePath}\x1b[0m${lineRangeInfo}`);
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
-
-			let highlighted;
-			let isLangSupported = detectedLang && detectedLang !== 'plain' && cliHighlight.supportsLanguage(detectedLang);
-			if (isLangSupported) {
-				try {
-					highlighted = cliHighlight.highlight(extractedText, {
-						language: detectedLang,
-						ignoreIllegals: true,
-						theme: custom_theme
-					});
-				} catch (e) {
-					highlighted = extractedText;
-				}
-			} else if (isLikelyCode(extractedText)) {
-				try {
-					highlighted = cliHighlight.highlight(extractedText, {
-						ignoreIllegals: true,
-						theme: custom_theme
-					});
-				} catch (e) {
-					highlighted = extractedText;
-				}
-			} else {
-				highlighted = extractedText;
-			}
-			console.log(highlighted);
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
-
 			file_context = `\n\n[File Context]\nFile: ${filePath}${lineRangeInfo}\n\`\`\`${detectedLang}\n${extractedText}\n\`\`\``;
 		}
 
@@ -2460,25 +2395,17 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			console.log('\n\x1b[36m✦ Clipboard Text Detected:\x1b[0m');
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m');
-			let highlighted = clipboardText.trim();
-			if (isLikelyCode(highlighted)) {
-				try {
-					highlighted = cliHighlight.highlight(highlighted, {
-						ignoreIllegals: true,
-						theme: custom_theme
-					});
-				} catch (e) {
-					highlighted = clipboardText.trim();
-				}
-			}
-			console.log(highlighted);
-			console.log('\x1b[90m--------------------------------------------------\x1b[0m\n');
-
 			const codeBlockLang = guessedLang || '';
 			clipboard_context = `\n\n[Clipboard Context]\n\`\`\`${codeBlockLang}\n${clipboardText.trim()}\n\`\`\``;
 		}
+
+		let combined_context = '';
+
+		if (clipboard_context) combined_context += clipboard_context;
+		if (file_context) combined_context += file_context;
+		if (vscode_context) combined_context += vscode_context;
+
+		let used_editor = false;
 
 		const promptArgs = process.argv.slice(2).join(' ');
 		if (!promptArgs.trim()) {
@@ -2486,7 +2413,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			const dirName = path.basename(cwd).replaceAll(' ', '_');
 			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_${dirName}.md`);
 			try {
-				fs.writeFileSync(tempPath, '', 'utf8');
+				fs.writeFileSync(tempPath, combined_context, 'utf8');
 				await new Promise((resolve, reject) => {
 					const editors = [];
 					if (process.env.NONO_EDITOR) {
@@ -2549,6 +2476,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					// Strip the HTML comment header injected by the editor
 					rawQuery = rawQuery.replace(/^<!-- Current directory: .*\nType your prompt below :\n-->\n?/s, '');
 					user_query = rawQuery.trim();
+					used_editor = true;
 					try {
 						fs.unlinkSync(tempPath);
 					} catch (e) {
@@ -2582,7 +2510,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			user_query = promptArgs;
 		}
 
-		let combined_context = '';
+		combined_context = '';
 		if (vscode_context) combined_context += vscode_context;
 		if (file_context) combined_context += file_context;
 		if (clipboard_context) combined_context += clipboard_context;
