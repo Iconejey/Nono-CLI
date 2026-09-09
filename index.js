@@ -404,7 +404,20 @@ async function handleBackgroundSummarization(session_path) {
 	const history_to_summarize = history.slice(0, slice_index);
 	const history_to_keep = history.slice(slice_index);
 
-	const summary_prompt = `Extract the key facts from this conversation history. Make sure this summarized context will only contain information that is relevant to the task direction. Anything that is not worth remembering should go. Retain exact file paths, critical variables, active error messages, and the current overall goal. Format as bullet points.`;
+	const summary_prompt = `You are compressing an agent's conversation history into a compact "[System Memory
+]" summary that will be the ONLY context the agent has going forward. Your PRIMARY job is to preserve the user's instructions so that NONE of them are lost.
+
+INPUT NOTE: The history you are given may itself begin with an earlier "[System Memory
+: ...]" block from a previous compression. That block already holds the consolidated instructions and key facts. You MUST carry EVERY instruction and key fact from it forward (in intent) — do not drop, loosely re-summarize, or lose any of them. Compression is iterative, so this is the single most common way instructions get lost.
+
+INSTRUCTIONS (HIGHEST PRIORITY):
+- Enumerate EVERY distinct instruction, requirement, constraint, and preference the user gave, from ALL user messages in this history AND from any prior System Memory block. Quote the user's exact wording wherever possible.
+- If a later user message adjusts, refines, overrides, or contradicts an earlier one, keep the original instruction AND the update together, and clearly label the CURRENT/valid version (e.g. prefix it with "Updated:") so the agent acts on the latest state. Do NOT keep only the first one or only the last one — preserve the full evolution.
+- Never collapse or merge multiple distinct instructions into a single bullet; keep each one separate.
+
+KEY FACTS (keep only what is still relevant to the task direction):
+- Exact file paths, critical variables, active error messages, key code decisions, and the current overall goal.
+Drop anything that is no longer useful. Format as clear bullet points, grouped by section.`;
 	const contents = [
 		...history_to_summarize,
 		{
