@@ -94,7 +94,6 @@ export function runProjectDryRun(modified_file_path) {
 			}
 
 			if (command) {
-				updateProgress(`• Running dry-run validation: ${command}`);
 				writeDetails(`[Dry-Run] Executing "${command}" in ${project_root}...`);
 				try {
 					const stdout = execSync(command, {
@@ -103,7 +102,6 @@ export function runProjectDryRun(modified_file_path) {
 						stdio: ['ignore', 'pipe', 'pipe']
 					});
 					writeDetails(`[Dry-Run] Success:\n${stdout}`);
-					updateProgress(`• Dry-run validation passed`);
 					return {
 						dry_run: {
 							command,
@@ -114,8 +112,7 @@ export function runProjectDryRun(modified_file_path) {
 				} catch (err) {
 					const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
 					writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
-					updateProgress(`• Dry-run validation failed`);
-					playChime('error');
+					updateProgress(`• Dry-run validation failed`, 'red');
 					return {
 						dry_run: {
 							command,
@@ -134,7 +131,6 @@ export function runProjectDryRun(modified_file_path) {
 	const cargo_toml_path = path.join(project_root, 'Cargo.toml');
 	if (fs.existsSync(cargo_toml_path)) {
 		const command = 'cargo check';
-		updateProgress(`• Running dry-run validation: ${command}`);
 		writeDetails(`[Dry-Run] Executing "${command}" in ${project_root}...`);
 		try {
 			const stdout = execSync(command, {
@@ -143,7 +139,6 @@ export function runProjectDryRun(modified_file_path) {
 				stdio: ['ignore', 'pipe', 'pipe']
 			});
 			writeDetails(`[Dry-Run] Success:\n${stdout}`);
-			updateProgress(`• Dry-run validation passed`);
 			return {
 				dry_run: {
 					command,
@@ -154,8 +149,7 @@ export function runProjectDryRun(modified_file_path) {
 		} catch (err) {
 			const error_msg = (err.stdout || '') + (err.stderr || '') + (err.message || '');
 			writeDetails(`[Dry-Run] Failed:\n${error_msg}`);
-			updateProgress(`• Dry-run validation failed`);
-			playChime('error');
+			updateProgress(`• Dry-run validation failed`, 'red');
 			return {
 				dry_run: {
 					command,
