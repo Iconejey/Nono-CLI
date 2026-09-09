@@ -191,10 +191,11 @@ export function convertGeminiToolsToOpenAI(tools) {
 	}));
 }
 
-export function pruneHistory(history) {
+export function pruneHistory(history, pruneAll = false) {
 	if (!Array.isArray(history)) return history;
-	// We prune all messages except the very last one in history
-	for (let i = 0; i < history.length - 1; i++) {
+	// We prune all messages except the very last one in history, unless pruneAll is true
+	const limit = pruneAll ? history.length : history.length - 1;
+	for (let i = 0; i < limit; i++) {
 		const message = history[i];
 		if (message && message.role === 'user' && Array.isArray(message.parts)) {
 			for (const part of message.parts) {

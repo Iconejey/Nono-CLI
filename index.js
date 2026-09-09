@@ -1595,6 +1595,8 @@ async function main() {
 		console.log(`\n\x1b[32m✔ Resumed session: ${session.prompt}\x1b[0m`);
 		console.log(`\x1b[90m--------------------------------------------------\x1b[0m`);
 
+		if (use_vllm) await ensureVllmInitialized();
+
 		for (const msg of session.history) {
 			if (!msg || !Array.isArray(msg.parts)) continue;
 
@@ -1607,30 +1609,78 @@ async function main() {
 							.replace(/^\[System Memory:\s*/, '')
 							.replace(/\]$/, '')
 							.trim();
-						console.log(`\n\x1b[33m🧠 System Memory:\x1b[0m`);
+						console.log();
 						console.log(`\x1b[90m${cleanMemory}\x1b[0m`);
+						console.log();
 					} else {
 						let cleanText = text;
 						const bonusIdx = cleanText.indexOf('\n\n[');
 						if (bonusIdx !== -1) {
 							cleanText = cleanText.substring(0, bonusIdx).trim();
 						}
-						console.log(`\n\x1b[36m\x1b[1m👤 User:\x1b[0m \x1b[1m${cleanText}\x1b[0m`);
+						console.log();
+						console.log(`\x1b[32;1m➤ ${cleanText}\x1b[0m`);
+						console.log();
 					}
 				}
 			} else if (msg.role === 'model') {
-				const textPart = msg.parts.find(p => p.text);
-				if (textPart && textPart.text) {
-					const modelText = textPart.text.trim();
-					try {
-						const highlighted = await highlightRawMarkdown(modelText);
-						console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${highlighted}`);
-					} catch (err) {
-						console.log(`\n\x1b[35m✦ Nono:\x1b[0m\n${modelText}`);
+				for (const part of msg.parts) {
+					if (part.functionCall) {
+						const { name, args } = part.functionCall;
+						if (name === 'comment') {
+							await commentTool(args);
+						} else if (name === 'final_answer') {
+							const final_text = args.response || 'Task completed.';
+							const formatted = await formatMarkdownForTerminal(cleanModelText(final_text).trim());
+							console.log();
+							console.log(`\x1b[35m✦\x1b[0m ${formatted}`);
+							console.log();
+						} else if (name === 'write_file' || name === 'patch_file') {
+							const msgIdx = session.history.indexOf(msg);
+							const nextMsg = session.history[msgIdx + 1];
+							let responsePart = null;
+							if (nextMsg && Array.isArray(nextMsg.parts)) {
+								responsePart = nextMsg.parts.find(p => p.functionResponse && p.functionResponse.name === name);
+							}
+							const response = responsePart?.functionResponse?.response;
+							let deleted = 0;
+							let added = 0;
+							if (response && typeof response.diff === 'string') {
+								const lines = response.diff.split('\n');
+								for (const line of lines) {
+									if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('@@') || line.startsWith('diff') || line.startsWith('index')) {
+										continue;
+									}
+									if (line.startsWith('-')) {
+										deleted++;
+									} else if (line.startsWith('+')) {
+										added++;
+									}
+								}
+							}
+							const baseName = path.basename(args.file_path);
+							const verb = name === 'write_file' ? 'Writing' : 'Patching';
+							const progressLine = formatProgressLine(`• ${verb} ${baseName} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
+							console.log(progressLine);
+						} else {
+							const tool_progress = formatToolCallProgress(name, args);
+							const progressLine = formatProgressLine(`• ${tool_progress}`);
+							console.log(progressLine);
+						}
 					}
 				}
 			}
 		}
+
+		const token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
+		const clonedHistory = JSON.parse(JSON.stringify(session.history));
+		pruneHistory(clonedHistory, true);
+		const current_tokens = Math.round(JSON.stringify(clonedHistory).length / 3.7);
+		latest_context_size = current_tokens;
+		const pct = token_limit > 0 ? Math.round((current_tokens / token_limit) * 100) : 0;
+		const formatted_current = (current_tokens / 1000).toFixed(1) + 'K';
+		const formatted_limit = (token_limit / 1000).toFixed(0) + 'K';
+		console.log(`\x1b[90m${formatted_current} / ${formatted_limit} (${pct}%)\x1b[0m`);
 		console.log(`\n\x1b[90m--------------------------------------------------\x1b[0m`);
 		console.log(`\x1b[32mSession context loaded! The next nono command will continue this session.\x1b[0m\n`);
 
