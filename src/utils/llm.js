@@ -50,8 +50,22 @@ export function convertToOpenAIMessages(history, system_instruction) {
 
 export function cleanModelText(text) {
 	if (!text) return '';
-	let cleaned = text;
 
+	// 1. Extract and replace triple-backtick code blocks
+	const codeBlocks = [];
+	let cleaned = text.replace(/```[\s\S]*?(?:```|$)/g, match => {
+		codeBlocks.push(match);
+		return `__CODE_BLOCK_PLACEHOLDER_${codeBlocks.length - 1}__`;
+	});
+
+	// 2. Extract and replace single-backtick inline code blocks
+	const inlineCodes = [];
+	cleaned = cleaned.replace(/`[^`]*?(?:`|$)/g, match => {
+		inlineCodes.push(match);
+		return `__INLINE_CODE_PLACEHOLDER_${inlineCodes.length - 1}__`;
+	});
+
+	// 3. Clean thinking blocks from the remaining (non-code) text
 	if (cleaned.includes('</think>')) {
 		const index = cleaned.indexOf('</think>');
 		cleaned = cleaned.substring(index + 8);
@@ -61,6 +75,16 @@ export function cleanModelText(text) {
 
 	// Strip dangling tool-calling tags
 	cleaned = cleaned.replace(/<\/?(tool_call|function|parameter)(=[a-zA-Z0-9_-]+)?>/gi, '');
+
+	// 4. Restore single-backtick inline code blocks
+	cleaned = cleaned.replace(/__INLINE_CODE_PLACEHOLDER_(\d+)__/g, (match, p1) => {
+		return inlineCodes[parseInt(p1, 10)];
+	});
+
+	// 5. Restore triple-backtick code blocks
+	cleaned = cleaned.replace(/__CODE_BLOCK_PLACEHOLDER_(\d+)__/g, (match, p1) => {
+		return codeBlocks[parseInt(p1, 10)];
+	});
 
 	return cleaned.trim();
 }
