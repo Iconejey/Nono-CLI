@@ -8,7 +8,7 @@ import { exec, execSync, spawn, spawnSync } from 'child_process';
 import readline from 'readline';
 import dotenv from 'dotenv';
 import { generateChimeWav, playChime } from './src/utils/sound.js';
-import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory } from './src/utils/llm.js';
+import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory, cleanThinkingFromMessage } from './src/utils/llm.js';
 import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
 import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
@@ -2913,7 +2913,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			// Add model's turn to history
-			await pushToHistoryAndCheckLimit(history, model_message, session_path);
+			await pushToHistoryAndCheckLimit(history, cleanThinkingFromMessage(model_message), session_path);
 
 			// Print any thoughts/explanations the model outputs in this turn
 			const text_part = model_message.parts?.find(p => p.text);

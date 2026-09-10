@@ -252,6 +252,66 @@ export function pruneHistory(history, pruneAll = false) {
 	return history;
 }
 
+export function cleanThinkingFromMessage(msg) {
+	if (!msg || typeof msg !== 'object') return msg;
+	if (!Array.isArray(msg.parts)) return msg;
+
+	// Deep clone msg.parts so we don't accidentally mutate the original model_message
+	let parts = msg.parts.map(p => {
+		if (!p) return p;
+		const cloned = { ...p };
+		if (cloned.functionCall) {
+			cloned.functionCall = { ...cloned.functionCall };
+			if (cloned.functionCall.args) {
+				cloned.functionCall.args = JSON.parse(JSON.stringify(cloned.functionCall.args));
+			}
+		}
+		if (cloned.functionResponse) {
+			cloned.functionResponse = { ...cloned.functionResponse };
+			if (cloned.functionResponse.response) {
+				cloned.functionResponse.response = JSON.parse(JSON.stringify(cloned.functionResponse.response));
+			}
+		}
+		return cloned;
+	});
+
+	// 1. Remove Gemini's thought parts (where part.thought === true)
+	parts = parts.filter(part => !part || !part.thought);
+
+	// 2. Clean <think>...</think> and dangling <think>... blocks from all text parts
+	parts = parts.map(part => {
+		if (part && typeof part.text === 'string') {
+			let text = part.text;
+			text = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+			text = text.replace(/<think>[\s\S]*/gi, '');
+			return { ...part, text: text };
+		}
+		return part;
+	});
+
+	// 3. Remove empty text parts
+	parts = parts.filter(part => {
+		if (!part) return false;
+		if (typeof part.text === 'string' && part.text.trim() === '') {
+			const keys = Object.keys(part);
+			if (keys.length === 1 && keys[0] === 'text') {
+				return false;
+			}
+		}
+		return true;
+	});
+
+	// 4. Ensure there is at least one part left to avoid API validation errors
+	if (parts.length === 0) {
+		parts.push({ text: 'Completed.' });
+	}
+
+	return {
+		...msg,
+		parts: parts
+	};
+}
+
 export function sanitizeHistory(history) {
 	if (!Array.isArray(history)) return [];
 	return history.filter(Boolean).map(msg => {
@@ -262,6 +322,10 @@ export function sanitizeHistory(history) {
 		}
 		if (!Array.isArray(msg.parts)) {
 			msg.parts = [];
+		}
+		// Clean thinking / reasoning from model/assistant messages
+		if (msg.role === 'model' || msg.role === 'assistant') {
+			msg = cleanThinkingFromMessage(msg);
 		}
 		return msg;
 	});
