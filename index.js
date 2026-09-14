@@ -468,27 +468,47 @@ Drop anything that is no longer useful. Format as clear bullet points, grouped b
 	}
 }
 
-async function ensureContextLimit(history, session_path) {
+async function ensureContextLimit(history, session_path, item_to_add = null) {
 	if (use_vllm) await ensureOpenaiInitialized();
 	else await ensureAiInitialized();
 	if (!history || history.length === 0 || !(ai || openai)) return;
 	try {
-		let total_tokens = latest_context_size || 0;
-		if (total_tokens === 0) {
+		const temp_history = item_to_add ? [...history, item_to_add] : history;
+		let total_tokens = 0;
+		if (item_to_add) {
 			if (use_vllm) {
-				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				total_tokens = Math.round(JSON.stringify(temp_history).length / 3.7);
 			} else if (ai) {
 				try {
 					const token_count_res = await ai.models.countTokens({
 						model: model_name,
-						contents: history
+						contents: temp_history
 					});
 					total_tokens = token_count_res.totalTokens || 0;
 				} catch (e) {
-					total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+					total_tokens = Math.round(JSON.stringify(temp_history).length / 3.7);
 				}
 			} else {
-				total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				total_tokens = Math.round(JSON.stringify(temp_history).length / 3.7);
+			}
+		} else {
+			total_tokens = latest_context_size || 0;
+			if (total_tokens === 0) {
+				if (use_vllm) {
+					total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				} else if (ai) {
+					try {
+						const token_count_res = await ai.models.countTokens({
+							model: model_name,
+							contents: history
+						});
+						total_tokens = token_count_res.totalTokens || 0;
+					} catch (e) {
+						total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+					}
+				} else {
+					total_tokens = Math.round(JSON.stringify(history).length / 3.7);
+				}
 			}
 		}
 
@@ -504,6 +524,7 @@ async function ensureContextLimit(history, session_path) {
 
 		if (total_tokens > threshold && user_turns >= 3) {
 			console.log(`${verbose ? '\x1b[36m' : '\x1b[90m'}• Session history is growing large (${total_tokens} tokens). Compressing...\x1b[0m`);
+			fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 			await handleBackgroundSummarization(session_path);
 			const new_history = sanitizeHistory(JSON.parse(fs.readFileSync(session_path, 'utf8')));
 			history.length = 0;
@@ -534,7 +555,7 @@ async function ensureContextLimit(history, session_path) {
 }
 
 async function pushToHistoryAndCheckLimit(history, item, session_path) {
-	await ensureContextLimit(history, session_path);
+	await ensureContextLimit(history, session_path, item);
 	history.push(item);
 }
 
