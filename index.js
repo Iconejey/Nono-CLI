@@ -897,6 +897,127 @@ async function finalAnswerTool({ response }) {
 	};
 }
 
+function getActiveTodoFilePath() {
+	const todo_dir = path.join(os.homedir(), '.cache', 'nono', 'todo');
+	if (!fs.existsSync(todo_dir)) {
+		fs.mkdirSync(todo_dir, { recursive: true });
+	}
+	const isPr = is_pr_review || fs.existsSync(path.join(os.homedir(), '.cache', 'nono', `pr-meta-${process.ppid}.json`));
+	const filename = isPr ? `todo-pr-${process.ppid}.json` : `todo-${process.ppid}.json`;
+	return path.join(todo_dir, filename);
+}
+
+function getSystemInstructionWithTodo(basePrompt) {
+	const todo_path = getActiveTodoFilePath();
+	if (fs.existsSync(todo_path)) {
+		try {
+			const todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
+			if (todos.length > 0) {
+				const formatted = todos
+					.map(t => {
+						let status_symbol = '[ ]';
+						if (t.status === 'completed') status_symbol = '[x]';
+						else if (t.status === 'in_progress') status_symbol = '[/]';
+						return `  ${status_symbol} (ID: ${t.id}) ${t.task}`;
+					})
+					.join('\n');
+				return `${basePrompt}\n\n### Current TODO List:\n${formatted}\n\nUse update_todo_item, add_todo_item, or remove_todo_item to manage your progress on long tasks. Always update your TODO list as you make progress.`;
+			}
+		} catch (e) {
+			// Ignore corrupt todo file
+		}
+	}
+	return basePrompt;
+}
+
+async function addTodoItem({ task }) {
+	const todo_path = getActiveTodoFilePath();
+	let todos = [];
+	if (fs.existsSync(todo_path)) {
+		try {
+			todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
+		} catch (e) {
+			// Ignore
+		}
+	}
+	const maxId = todos.reduce((max, t) => Math.max(max, Number(t.id) || 0), 0);
+	const new_item = {
+		id: String(maxId + 1),
+		task,
+		status: 'pending'
+	};
+	todos.push(new_item);
+	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	return {
+		status: 'success',
+		message: `Added todo item: "${task}" (ID: ${new_item.id})`
+	};
+}
+
+async function updateTodoItem({ id, status }) {
+	const todo_path = getActiveTodoFilePath();
+	if (!fs.existsSync(todo_path)) {
+		return {
+			status: 'error',
+			message: 'No TODO list exists yet.'
+		};
+	}
+	let todos = [];
+	try {
+		todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
+	} catch (e) {
+		return {
+			status: 'error',
+			message: 'Failed to read TODO list.'
+		};
+	}
+	const item = todos.find(t => String(t.id) === String(id));
+	if (!item) {
+		return {
+			status: 'error',
+			message: `Could not find a todo item with ID "${id}".`
+		};
+	}
+	item.status = status;
+	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	return {
+		status: 'success',
+		message: `Updated todo item ID "${id}" to status "${status}".`
+	};
+}
+
+async function removeTodoItem({ id }) {
+	const todo_path = getActiveTodoFilePath();
+	if (!fs.existsSync(todo_path)) {
+		return {
+			status: 'error',
+			message: 'No TODO list exists yet.'
+		};
+	}
+	let todos = [];
+	try {
+		todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
+	} catch (e) {
+		return {
+			status: 'error',
+			message: 'Failed to read TODO list.'
+		};
+	}
+	const index = todos.findIndex(t => String(t.id) === String(id));
+	if (index === -1) {
+		return {
+			status: 'error',
+			message: `Could not find a todo item with ID "${id}".`
+		};
+	}
+	const removed = todos.splice(index, 1);
+	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	return {
+		status: 'success',
+		message: `Removed todo item: "${removed[0].task}" (ID: ${id})`
+	};
+}
+
 function isStateChangingTool(name) {
 	const read_only_tools = new Set(['list_directory_structure', 'view_file_contents', 'search_grep', 'view_file_git_diff', 'read_terminal_buffer', 'gemini_web_search', 'comment']);
 	return !read_only_tools.has(name);
@@ -908,6 +1029,9 @@ function areArgsEqual(args1, args2) {
 
 // Map tool name to implementation function
 const tools_mapping = {
+	add_todo_item: addTodoItem,
+	update_todo_item: updateTodoItem,
+	remove_todo_item: removeTodoItem,
 	list_directory_structure: listDirectoryStructure,
 	view_file_contents: viewFileContents,
 	write_file: writeFile,
@@ -934,6 +1058,53 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 
 const tools_declarations = [
+	{
+		name: 'add_todo_item',
+		description: 'Adds a new item to your active TODO list for tracking progress in long or complex tasks.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				task: {
+					type: 'STRING',
+					description: 'The description of the task or milestone to track.'
+				}
+			},
+			required: ['task']
+		}
+	},
+	{
+		name: 'update_todo_item',
+		description: 'Updates the status of an existing todo item to track your progress.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				id: {
+					type: 'STRING',
+					description: 'The unique ID of the todo item to update.'
+				},
+				status: {
+					type: 'STRING',
+					description: 'The new status of the task.',
+					enum: ['pending', 'in_progress', 'completed']
+				}
+			},
+			required: ['id', 'status']
+		}
+	},
+	{
+		name: 'remove_todo_item',
+		description: 'Removes a todo item from your active TODO list.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				id: {
+					type: 'STRING',
+					description: 'The unique ID of the todo item to remove.'
+				}
+			},
+			required: ['id']
+		}
+	},
 	{
 		name: 'comment',
 		description: 'Outputs a thought, comment, explanation, or progress update to the user. Use this to explain your strategy, status, or plans.',
@@ -1178,6 +1349,7 @@ CRITICAL INSTRUCTIONS:
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
 - Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
+- Task Tracking and TODO List: For complex or multi-step tasks, you should maintain a structured TODO list using "add_todo_item", "update_todo_item", and "remove_todo_item". The active list is automatically appended to your system instructions on every turn so you never lose track of your progress. Initialize the list early, update items to "in_progress" or "completed" as you work, and keep it accurate.
 - Keep a clean context history. Use the appropriate tools to clean tool outputs that don't seem relevant or usefull anymore for the remaining of the task.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 - Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
@@ -1206,6 +1378,7 @@ Constraints:
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
 - Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
+- Task Tracking and TODO List: For complex or multi-step tasks, you should maintain a structured TODO list using "add_todo_item", "update_todo_item", and "remove_todo_item". The active list is automatically appended to your system instructions on every turn so you never lose track of your progress. Initialize the list early, update items to "in_progress" or "completed" as you work, and keep it accurate.
 
 Provide your final report as your final text message without calling any more tools.`;
 
@@ -1224,6 +1397,7 @@ Constraints:
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
 - Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
+- Task Tracking and TODO List: For complex or multi-step tasks, you should maintain a structured TODO list using "add_todo_item", "update_todo_item", and "remove_todo_item". The active list is automatically appended to your system instructions on every turn so you never lose track of your progress. Initialize the list early, update items to "in_progress" or "completed" as you work, and keep it accurate.
 
 Interaction Flow:
 - You MUST present issues one by one.
@@ -2657,7 +2831,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				try {
 					const start_api_time = Date.now();
 					if (use_vllm) {
-						const systemInstruction = is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt;
+						const systemInstruction = getSystemInstructionWithTodo(is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt);
 						const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
 						const base_tools = is_initial_pr_review
 							? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
@@ -2761,7 +2935,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							model: model_name,
 							contents: history,
 							config: {
-								systemInstruction: is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt,
+								systemInstruction: getSystemInstructionWithTodo(is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt),
 								tools: [
 									{
 										functionDeclarations: (is_initial_pr_review

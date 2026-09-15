@@ -70,10 +70,39 @@ export function formatProgressLine(text, color) {
 	return `${ansi_prefix}${raw}${ansi_suffix}`;
 }
 
+function getTodoTitle(id) {
+	try {
+		const todo_dir = path.join(os.homedir(), '.cache', 'nono', 'todo');
+		const files = [`todo-pr-${process.ppid}.json`, `todo-${process.ppid}.json`];
+		for (const file of files) {
+			const filepath = path.join(todo_dir, file);
+			if (fs.existsSync(filepath)) {
+				const todos = JSON.parse(fs.readFileSync(filepath, 'utf8'));
+				const item = todos.find(t => String(t.id) === String(id));
+				if (item) return item.task;
+			}
+		}
+	} catch (e) {
+		// Ignore
+	}
+	return `task ID ${id}`;
+}
+
 export function formatToolCallProgress(name, args) {
 	const basename = args.file_path ? path.basename(args.file_path) : '';
 
 	switch (name) {
+		case 'add_todo_item': {
+			return `Added "${args.task}" to todo list`;
+		}
+		case 'update_todo_item': {
+			const title = getTodoTitle(args.id);
+			return `Marked "${title}" as ${args.status}`;
+		}
+		case 'remove_todo_item': {
+			const title = getTodoTitle(args.id);
+			return `Removed "${title}" from todo list`;
+		}
 		case 'list_directory_structure': {
 			const dir = args.directory_path ? path.basename(args.directory_path) || args.directory_path : '.';
 			return `Listing directory structure of "${dir}"`;
