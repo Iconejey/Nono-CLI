@@ -51,10 +51,15 @@ const api_key = process.env.GEMINI_API_KEY;
 const model_name = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOLUME) : 0.6;
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
-const default_output_limit = process.env.NONO_SUMMARIZE_OUTPUT_LIMIT ? parseInt(process.env.NONO_SUMMARIZE_OUTPUT_LIMIT, 10) : 10000;
-const output_limit = isNaN(default_output_limit) ? 10000 : default_output_limit;
+const default_large_output_detection_limit = process.env.LARGE_OUTPUT_DETECTION_LIMIT ? parseInt(process.env.LARGE_OUTPUT_DETECTION_LIMIT, 10) : 1000;
+const large_output_detection_limit = isNaN(default_large_output_detection_limit) ? 1000 : default_large_output_detection_limit;
+const default_large_output_truncation_limit = process.env.LARGE_OUTPUT_TRUNCATION_LIMIT ? parseInt(process.env.LARGE_OUTPUT_TRUNCATION_LIMIT, 10) : 25000;
+const large_output_truncation_limit = isNaN(default_large_output_truncation_limit) ? 25000 : default_large_output_truncation_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
 export const thought_limit = isNaN(default_thought_limit) ? 120 : default_thought_limit;
+
+let is_pr_review = false;
+let active_large_outputs = [];
 
 if (!use_vllm && !api_key && !['--details', '--help', '-h', '--summarize-background', '--raw', '--resume', '--list-instructions', '--add-instructions'].includes(process.argv[2])) {
 	console.error('\x1b[31mError: GEMINI_API_KEY is not set.\x1b[0m');
@@ -326,48 +331,6 @@ process.stderr.write = function (chunk, encoding, callback) {
 
 	return result;
 };
-
-// Helper to run a sub-agent for summarizing massive tool output
-async function runSummarizationSubAgent(originalResult, query) {
-	if (use_vllm) await ensureOpenaiInitialized();
-	else await ensureAiInitialized();
-	if (!ai && !openai) {
-		return 'Error: AI client not initialized.';
-	}
-	try {
-		const resultString = JSON.stringify(originalResult, null, 2);
-		const prompt = `You are a helper sub-agent for a main coding assistant.
-Your task is to summarize or extract the relevant parts of a tool output because the output is too large to fit in the context window.
-
-The main agent is looking for: "${query}"
-
-Here is the original tool output:
-<tool_output>
-${resultString}
-</tool_output>
-
-Please return a concise, targeted summary or extraction of the relevant parts that satisfies the main agent's query. Maintain crucial technical details, paths, variables, and line numbers if relevant.`;
-
-		let text = '';
-		if (use_vllm) {
-			const oai_response = await openai.chat.completions.create({
-				model: vllm_model_name,
-				messages: [{ role: 'user', content: prompt }]
-			});
-			text = oai_response.choices?.[0]?.message?.content || '';
-			text = cleanModelText(text);
-		} else {
-			const response = await ai.models.generateContent({
-				model: model_name,
-				contents: [{ role: 'user', parts: [{ text: prompt }] }]
-			});
-			text = response.candidates?.[0]?.content?.parts?.[0]?.text;
-		}
-		return text || 'Could not summarize the tool output.';
-	} catch (err) {
-		return `Error running summarization sub-agent: ${err.message || err}`;
-	}
-}
 
 // Helper for background summarization process
 async function handleBackgroundSummarization(session_path) {
@@ -934,8 +897,81 @@ async function finalAnswerTool({ response }) {
 	};
 }
 
+function getActiveNotesFilePath() {
+	const notes_dir = path.join(os.homedir(), '.cache', 'nono', 'notes');
+	if (!fs.existsSync(notes_dir)) {
+		fs.mkdirSync(notes_dir, { recursive: true });
+	}
+	const isPr = is_pr_review || fs.existsSync(path.join(os.homedir(), '.cache', 'nono', `pr-meta-${process.ppid}.json`));
+	const filename = isPr ? `notes-pr-${process.ppid}.md` : `notes-${process.ppid}.md`;
+	return path.join(notes_dir, filename);
+}
+
+function isStateChangingTool(name) {
+	const read_only_tools = new Set(['list_directory_structure', 'view_file_contents', 'search_grep', 'view_file_git_diff', 'read_terminal_buffer', 'gemini_web_search', 'comment']);
+	return !read_only_tools.has(name);
+}
+
+function areArgsEqual(args1, args2) {
+	return JSON.stringify(args1) === JSON.stringify(args2);
+}
+
+async function writeSessionNotes({ content }) {
+	const notes_path = getActiveNotesFilePath();
+	try {
+		fs.writeFileSync(notes_path, content, 'utf8');
+		for (const item of active_large_outputs) {
+			item.notes_edited = true;
+		}
+		return {
+			status: 'success',
+			message: `Session notes written successfully to ${notes_path}.`
+		};
+	} catch (err) {
+		return {
+			status: 'error',
+			message: `Failed to write session notes: ${err.message}`
+		};
+	}
+}
+
+async function patchSessionNotes({ search_block, replace_block }) {
+	const notes_path = getActiveNotesFilePath();
+	try {
+		if (!fs.existsSync(notes_path)) {
+			return {
+				status: 'error',
+				message: `Notes file does not exist. Please write the session notes first using write_session_notes.`
+			};
+		}
+		const existing_content = fs.readFileSync(notes_path, 'utf8');
+		if (!existing_content.includes(search_block)) {
+			return {
+				status: 'error',
+				message: `Could not find the search_block in the current notes. Modification failed.`
+			};
+		}
+		const updated_content = existing_content.replace(search_block, replace_block);
+		fs.writeFileSync(notes_path, updated_content, 'utf8');
+		for (const item of active_large_outputs) {
+			item.notes_edited = true;
+		}
+		return {
+			status: 'success',
+			message: `Session notes patched successfully.`
+		};
+	} catch (err) {
+		return {
+			status: 'error',
+			message: `Failed to patch session notes: ${err.message}`
+		};
+	}
+}
+
 // Map tool name to implementation function
 const tools_mapping = {
+	write_session_notes: writeSessionNotes,
+	patch_session_notes: patchSessionNotes,
 	list_directory_structure: listDirectoryStructure,
 	view_file_contents: viewFileContents,
 	write_file: writeFile,
@@ -962,6 +998,39 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 
 const tools_declarations = [
+	{
+		name: 'write_session_notes',
+		description: "Overwrites the entire content of the active session's notes file. Use this for initializing notes, or writing short notes where full overwrites are fast and cost-effective.",
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				content: {
+					type: 'STRING',
+					description: "The entire new content to write to the session's notes file."
+				}
+			},
+			required: ['content']
+		}
+	},
+	{
+		name: 'patch_session_notes',
+		description:
+			"Performs a deterministic find-and-replace block modification on the active session's notes file. Use this for making fine-grained, token-efficient updates to specific lines, lists, or checklists once the notes file becomes long.",
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				search_block: {
+					type: 'STRING',
+					description: 'The original exact code or text block to find in the notes file.'
+				},
+				replace_block: {
+					type: 'STRING',
+					description: 'The new code or text block to substitute.'
+				}
+			},
+			required: ['search_block', 'replace_block']
+		}
+	},
 	{
 		name: 'comment',
 		description: 'Outputs a thought, comment, explanation, or progress update to the user. Use this to explain your strategy, status, or plans.',
@@ -1205,7 +1274,7 @@ CRITICAL INSTRUCTIONS:
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc). Make sure to fix errors if any.
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
-- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
+- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
 - Keep a clean context history. Use the appropriate tools to clean tool outputs that don't seem relevant or usefull anymore for the remaining of the task.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 - Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
@@ -1233,7 +1302,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
-- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
+- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
 
 Provide your final report as your final text message without calling any more tools.`;
 
@@ -1251,7 +1320,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
-- Tool Output Summarization: Any tool output exceeding the configured character limit is intercepted and returns a "Tool output is too long" error. In your next turn, describe what specific information, patterns, or sections you want to find. A sub-agent will automatically extract/summarize it for you from the raw output, returning it as the tool response in your subsequent turn. Keep your queries specific to get accurate details.
+- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
 
 Interaction Flow:
 - You MUST present issues one by one.
@@ -1356,7 +1425,7 @@ async function main() {
 		}
 	} catch (e) {}
 
-	let is_pr_review = false;
+	is_pr_review = false;
 	let is_initial_pr_review = false;
 	let pr_review_base_branch = '';
 	let pr_review_temp_dir = '';
@@ -1400,6 +1469,131 @@ async function main() {
 		return;
 	}
 
+	// Handle nono --notes or -n argument
+	if (process.argv[2] === '--notes' || process.argv[2] === '-n') {
+		const notes_path = getActiveNotesFilePath();
+		const notes_dir = path.dirname(notes_path);
+		if (!fs.existsSync(notes_dir)) {
+			fs.mkdirSync(notes_dir, { recursive: true });
+		}
+
+		if (!fs.existsSync(notes_path)) {
+			const initialHeader = `# Session Notes\n\nThis is a freeform scratchpad for the current session.\n`;
+			fs.writeFileSync(notes_path, initialHeader, 'utf8');
+		}
+
+		const editor = process.env.NONO_EDITOR || process.env.VISUAL || process.env.EDITOR || 'nano';
+		const parts = editor.trim().split(/\s+/);
+		const cmd = parts[0];
+		const args = [...parts.slice(1), notes_path];
+
+		let resolved_cmd = cmd;
+		try {
+			resolved_cmd = execSync(`which ${cmd}`, { encoding: 'utf8' }).trim();
+		} catch (e) {
+			// Fallback to original if which fails
+		}
+
+		const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID || !!process.env.KITTY_WINDOW_ID;
+		const is_ptyxis = !!process.env.PTYXIS_VERSION || !!process.env.PTYXIS_PROFILE;
+
+		const term_cmds = [
+			// 1. Ptyxis (GNOME's new default terminal - new tab)
+			{
+				check: () => is_ptyxis,
+				cmd: 'ptyxis',
+				args: ['--tab', '-T', 'Notes', '--', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 2. Kitty (Remote Control - new tab)
+			{
+				check: () => is_kitty,
+				cmd: 'kitty',
+				args: ['@', 'launch', '--type=tab', '--tab-title', 'Notes', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 3. Kitty (Direct - new window/instance)
+			{
+				cmd: 'kitty',
+				args: ['--title', 'Notes', resolved_cmd, ...args],
+				nonBlocking: false
+			},
+			// 4. Ptyxis fallback (new tab)
+			{
+				cmd: 'ptyxis',
+				args: ['--tab', '-T', 'Notes', '--', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 5. GNOME Terminal (new tab)
+			{
+				cmd: 'gnome-terminal',
+				args: ['--tab', '--title=Notes', '--', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 6. GNOME Console (kgx - new tab)
+			{
+				cmd: 'kgx',
+				args: ['--tab', '--', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 7. Konsole (new tab)
+			{
+				cmd: 'konsole',
+				args: ['--new-tab', '-e', resolved_cmd, ...args],
+				nonBlocking: true
+			},
+			// 8. XFCE Terminal (new tab)
+			{
+				cmd: 'xfce4-terminal',
+				args: ['--tab', '-x', resolved_cmd, ...args],
+				nonBlocking: true
+			}
+		];
+
+		function tryTerminals(index) {
+			if (index >= term_cmds.length) {
+				console.log(`No supported terminal emulator succeeded. Spawning in the current terminal instead...`);
+				const child = spawn(resolved_cmd, args, { stdio: 'inherit' });
+				child.on('error', err => {
+					console.error(`Error starting editor:`, err.message);
+					process.exit(1);
+				});
+				child.on('exit', () => process.exit(0));
+				return;
+			}
+
+			const term = term_cmds[index];
+			if (term.check && !term.check()) {
+				tryTerminals(index + 1);
+				return;
+			}
+
+			try {
+				execSync(`which ${term.cmd}`, { stdio: 'ignore' });
+				// Binary exists! Try to launch it.
+				const formattedArgs = term.args.map(arg => JSON.stringify(arg)).join(' ');
+				const full_cmd = `${term.cmd} ${formattedArgs}`;
+
+				if (term.nonBlocking) {
+					execSync(full_cmd, { stdio: 'ignore' });
+					process.exit(0);
+				} else {
+					exec(full_cmd, err => {
+						if (err) {
+							tryTerminals(index + 1);
+						}
+					});
+					setTimeout(() => process.exit(0), 200);
+				}
+			} catch (e) {
+				tryTerminals(index + 1);
+			}
+		}
+
+		tryTerminals(0);
+		return;
+	}
+
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
@@ -1415,6 +1609,7 @@ async function main() {
   nono --resume              List and interactively select previous session context to resume
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
+  nono --notes, -n           Open the current session's notes in your editor
   nono --commit              Generate commit message suggestions for staged edits and commit
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
@@ -2672,7 +2867,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 	drawBottomLine();
 
 	// Start the ReAct execution loop
-	let pendingSummaryTriggers = [];
+	let last_executed_tool = null;
 	const grounding_sources = [];
 	const web_search_queries = [];
 
@@ -2902,37 +3097,6 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			if (pendingSummaryTriggers.length > 0) {
-				const text_part = model_message.parts?.find(p => p.text);
-				const query = text_part ? text_part.text.trim() : 'relevant details';
-
-				writeDetails(`\n[Summarizer Trigger] Model specified search query: "${query}"`);
-
-				const last_user_msg = history[history.length - 1];
-				if (last_user_msg && last_user_msg.role === 'user' && Array.isArray(last_user_msg.parts)) {
-					for (const trigger of pendingSummaryTriggers) {
-						const summary = await runSummarizationSubAgent(trigger.originalResult, query);
-						writeDetails(`[Summarizer Trigger] Summary generated for ${trigger.name}:\n${summary}`);
-
-						const matching_part = last_user_msg.parts.find(p => p.functionResponse && p.functionResponse.name === trigger.name && (!trigger.callId || p.functionResponse.id === trigger.callId));
-						if (matching_part) {
-							matching_part.functionResponse.response = {
-								status: 'success',
-								summary: summary,
-								is_summarized: true
-							};
-						}
-					}
-				}
-
-				pendingSummaryTriggers = [];
-
-				pruneHistory(history);
-				fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
-
-				continue;
-			}
-
 			// Add model's turn to history
 			await pushToHistoryAndCheckLimit(history, cleanThinkingFromMessage(model_message), session_path);
 
@@ -3103,6 +3267,27 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
+			// Check if any of the requested calls are non-note-edit calls
+			const has_non_note_edit_call = function_calls.some(p => {
+				const name = p.functionCall.name;
+				return name !== 'write_session_notes' && name !== 'patch_session_notes';
+			});
+
+			if (has_non_note_edit_call && active_large_outputs.length > 0) {
+				for (const item of active_large_outputs) {
+					const message = item.notes_edited
+						? `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters. This tool output resulted in note edits.]`
+						: `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters. This tool output did not result in any note edits.]`;
+
+					item.functionResponse.response = {
+						status: 'success',
+						message: message
+					};
+				}
+				// Clear the tracked list as they have been purged
+				active_large_outputs = [];
+			}
+
 			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
 			const response_parts = [];
 			for (const call_part of function_calls) {
@@ -3114,15 +3299,30 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 				writeDetails(`\n[Tool Call] Running: ${name} with args:\n${JSON.stringify(args, null, 2)}`);
 
-				const tool_fn = tools_mapping[name];
 				let result;
-				if (!tool_fn) {
-					result = { error: `Tool "${name}" is not implemented.` };
+				// Deduplication check
+				if (last_executed_tool && last_executed_tool.name === name && areArgsEqual(last_executed_tool.args, args)) {
+					result = {
+						status: 'error',
+						error: `Warning: Consecutive identical tool call to "${name}" detected with the exact same parameters. Please check your session notes or vary your query parameters to avoid an infinite loop.`
+					};
 				} else {
-					try {
-						result = await tool_fn(args, history);
-					} catch (err) {
-						result = { error: err.message || String(err) };
+					const tool_fn = tools_mapping[name];
+					if (!tool_fn) {
+						result = { error: `Tool "${name}" is not implemented.` };
+					} else {
+						try {
+							result = await tool_fn(args, history);
+						} catch (err) {
+							result = { error: err.message || String(err) };
+						}
+					}
+
+					// Update deduplication tracker
+					if (isStateChangingTool(name)) {
+						last_executed_tool = null;
+					} else {
+						last_executed_tool = { name, args };
 					}
 				}
 
@@ -3131,24 +3331,26 @@ Analyze the changed files, trace references in the codebase, and write your fina
 
 				writeDetails(`[Tool Result] for ${name}:\n${JSON.stringify(result, null, 2)}`);
 
-				// Check if output exceeds the configured limit
+				// Check if output is a "large output"
 				const result_str = JSON.stringify(result);
-				const isSummarized = result_str.length > output_limit;
-				if (isSummarized) {
-					pendingSummaryTriggers.push({
-						name,
-						callId: id,
-						originalResult: result
-					});
-					result = {
-						status: 'error',
-						error: `Tool output is too long (${result_str.length} characters, limit is ${output_limit} characters). What specific information or pattern are you looking for in this output? Please describe it in your next turn so a sub-agent can extract/summarize it.`
+				const is_large = result_str.length > large_output_detection_limit;
+				let processed_result = result;
+
+				if (result_str.length > large_output_truncation_limit) {
+					const half_limit = Math.floor(large_output_truncation_limit / 2);
+					const first_part = result_str.slice(0, half_limit);
+					const last_part = result_str.slice(-half_limit);
+					const truncated_count = result_str.length - (first_part.length + last_part.length);
+					processed_result = {
+						status: 'success',
+						message: 'Tool output was truncated due to length.',
+						output: `${first_part}\n\n[... ${truncated_count} characters truncated from middle to prevent context bloat ...]\n\n${last_part}`
 					};
 				}
 
-				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer') {
+				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer' && name !== 'write_session_notes' && name !== 'patch_session_notes') {
 					const tool_progress = formatToolCallProgress(name, args);
-					const suffix = isSummarized ? ' \x1b[90m[sum]\x1b[0m' : '';
+					const suffix = is_large ? ' \x1b[90m[large]\x1b[0m' : '';
 					const progressLine = formatProgressLine(`• ${tool_progress}${suffix}`);
 					console.log(progressLine);
 				}
@@ -3156,13 +3358,21 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				const function_response_part = {
 					functionResponse: {
 						name,
-						response: result
+						response: processed_result
 					}
 				};
 				if (id) {
 					function_response_part.functionResponse.id = id;
 				}
 				response_parts.push(function_response_part);
+
+				if (is_large) {
+					active_large_outputs.push({
+						functionResponse: function_response_part.functionResponse,
+						original_length: result_str.length,
+						notes_edited: false
+					});
+				}
 
 				if (name === 'final_answer') {
 					await finishProgress(args.response || 'Task completed.', grounding_sources);
