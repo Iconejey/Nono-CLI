@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { exec, execSync, spawn } from 'child_process';
 import { verbose, thought_limit } from '../../index.js';
 
 export function formatK(val) {
@@ -244,4 +245,103 @@ export function formatTable(table_lines, resetStyle = '\x1b[0m') {
 
 	formatted.push(bottom_border);
 	return formatted;
+}
+
+export function spawnInNewTerminalTab(title, executable, args = []) {
+	const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID || !!process.env.KITTY_WINDOW_ID;
+	const is_ptyxis = !!process.env.PTYXIS_VERSION || !!process.env.PTYXIS_PROFILE;
+
+	const term_cmds = [
+		// 1. Ptyxis (GNOME's default terminal - new tab)
+		{
+			check: () => is_ptyxis,
+			cmd: 'ptyxis',
+			args: ['--tab', '-T', title, '--', executable, ...args],
+			nonBlocking: true
+		},
+		// 2. Kitty (Remote Control - new tab)
+		{
+			check: () => is_kitty,
+			cmd: 'kitty',
+			args: ['@', 'launch', '--type=tab', '--tab-title', title, executable, ...args],
+			nonBlocking: true
+		},
+		// 3. Kitty (Direct - new window)
+		{
+			cmd: 'kitty',
+			args: ['--title', title, executable, ...args],
+			nonBlocking: false
+		},
+		// 4. Ptyxis fallback
+		{
+			cmd: 'ptyxis',
+			args: ['--tab', '-T', title, '--', executable, ...args],
+			nonBlocking: true
+		},
+		// 5. GNOME Terminal
+		{
+			cmd: 'gnome-terminal',
+			args: ['--tab', `--title=${title}`, '--', executable, ...args],
+			nonBlocking: true
+		},
+		// 6. GNOME Console (kgx)
+		{
+			cmd: 'kgx',
+			args: ['--tab', '--', executable, ...args],
+			nonBlocking: true
+		},
+		// 7. Konsole
+		{
+			cmd: 'konsole',
+			args: ['--new-tab', '-e', executable, ...args],
+			nonBlocking: true
+		},
+		// 8. XFCE Terminal
+		{
+			cmd: 'xfce4-terminal',
+			args: ['--tab', '-x', executable, ...args],
+			nonBlocking: true
+		}
+	];
+
+	function tryTerminals(index) {
+		if (index >= term_cmds.length) {
+			console.log(`No supported terminal emulator succeeded. Spawning program in the current terminal window...`);
+			const child = spawn(executable, args, { stdio: 'inherit' });
+			child.on('error', err => {
+				console.error(`Error starting program:`, err.message);
+				process.exit(1);
+			});
+			child.on('exit', () => process.exit(0));
+			return;
+		}
+
+		const term = term_cmds[index];
+		if (term.check && !term.check()) {
+			tryTerminals(index + 1);
+			return;
+		}
+
+		try {
+			execSync(`which ${term.cmd}`, { stdio: 'ignore' });
+			const formattedArgs = term.args.map(arg => JSON.stringify(arg)).join(' ');
+			const full_cmd = `${term.cmd} ${formattedArgs}`;
+
+			if (term.nonBlocking) {
+				execSync(full_cmd, { stdio: 'ignore' });
+				process.exit(0);
+			} else {
+				exec(full_cmd, err => {
+					if (err) {
+						tryTerminals(index + 1);
+					}
+				});
+				setTimeout(() => process.exit(0), 200);
+			}
+		} catch (e) {
+			tryTerminals(index + 1);
+		}
+	}
+
+	tryTerminals(0);
 }

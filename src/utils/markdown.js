@@ -291,3 +291,22 @@ export async function highlightRawMarkdown(md) {
 	}
 	return output_lines.join('\n');
 }
+
+export function formatTodoListToMarkdown(todos, isForSystemPrompt = false) {
+	if (!todos || todos.length === 0) return '';
+	return todos
+		.map(t => {
+			let status_symbol = ' ';
+			let status_text = '';
+			if (t.status === 'completed') {
+				status_symbol = 'x';
+				if (!isForSystemPrompt) status_text = ' (Completed)';
+			} else if (t.status === 'in_progress') {
+				status_symbol = '/';
+				if (!isForSystemPrompt) status_text = ' (In Progress)';
+			}
+			const bullet = isForSystemPrompt ? '  ' : '* ';
+			return `${bullet}[${status_symbol}] **(ID: ${t.id})** ${t.task}${status_text}`;
+		})
+		.join('\n');
+}

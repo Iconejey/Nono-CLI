@@ -11,8 +11,8 @@ import { generateChimeWav, playChime } from './src/utils/sound.js';
 import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToGeminiResponse, convertGeminiToolsToOpenAI, pruneHistory, sanitizeHistory, cleanThinkingFromMessage } from './src/utils/llm.js';
 import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
 import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
-import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable } from './src/utils/terminal.js';
-import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown } from './src/utils/markdown.js';
+import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable, spawnInNewTerminalTab } from './src/utils/terminal.js';
+import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown, formatTodoListToMarkdown } from './src/utils/markdown.js';
 import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
 import { findCorrespondingCall, matchesTarget, discardSpecificOutput, discardLastSteps } from './src/utils/history.js';
 
@@ -913,14 +913,7 @@ function getSystemInstructionWithTodo(basePrompt) {
 		try {
 			const todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
 			if (todos.length > 0) {
-				const formatted = todos
-					.map(t => {
-						let status_symbol = '[ ]';
-						if (t.status === 'completed') status_symbol = '[x]';
-						else if (t.status === 'in_progress') status_symbol = '[/]';
-						return `  ${status_symbol} (ID: ${t.id}) ${t.task}`;
-					})
-					.join('\n');
+				const formatted = formatTodoListToMarkdown(todos, true);
 				return `${basePrompt}\n\n### Current TODO List:\n${formatted}\n\nUse update_todo_item, add_todo_item, or remove_todo_item to manage your progress on long tasks. Always update your TODO list as you make progress.`;
 			}
 		} catch (e) {
@@ -1546,6 +1539,26 @@ async function main() {
 		return;
 	}
 
+	// Handle nono --todo argument
+	if (process.argv[2] === '--todo') {
+		const todo_path = getActiveTodoFilePath();
+		const todo_dir = path.dirname(todo_path);
+		if (!fs.existsSync(todo_dir)) {
+			fs.mkdirSync(todo_dir, { recursive: true });
+		}
+
+		if (!fs.existsSync(todo_path)) {
+			fs.writeFileSync(todo_path, '[]', 'utf8');
+		}
+
+		const watcher_script_path = path.join(dir_name, 'src', 'scripts', 'todo-watcher.js');
+		const resolved_cmd = process.execPath;
+		const args = [watcher_script_path, todo_path];
+
+		spawnInNewTerminalTab('Nono TODO', resolved_cmd, args);
+		return;
+	}
+
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
@@ -1561,6 +1574,7 @@ async function main() {
   nono --resume              List and interactively select previous session context to resume
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
+  nono --todo                Open and watch the active session's TODO list in a new terminal tab
   nono --commit              Generate commit message suggestions for staged edits and commit
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
