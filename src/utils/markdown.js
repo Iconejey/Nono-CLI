@@ -202,6 +202,21 @@ export async function formatMarkdownForTerminal(md, options = {}) {
 			}
 		}
 
+		// Handle list items (e.g., *, -, +)
+		const list_match = line.match(/^(\s*)([-*+])\s+(.*)/);
+		if (list_match) {
+			const indent = list_match[1];
+			const content = list_match[3];
+			const processed_content = processInlineStyles(content, resetStyle);
+			const bullet = '\x1b[35m•\x1b[0m';
+			if (is_gray) {
+				formatted_lines.push(`${indent}${bullet} ${base_color}${processed_content}\x1b[0m`);
+			} else {
+				formatted_lines.push(`${indent}${bullet} ${processed_content}`);
+			}
+			continue;
+		}
+
 		// Handle standard lists & text lines
 		let processed = processInlineStyles(line, resetStyle);
 		if (is_gray) {
