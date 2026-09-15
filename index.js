@@ -897,16 +897,6 @@ async function finalAnswerTool({ response }) {
 	};
 }
 
-function getActiveNotesFilePath() {
-	const notes_dir = path.join(os.homedir(), '.cache', 'nono', 'notes');
-	if (!fs.existsSync(notes_dir)) {
-		fs.mkdirSync(notes_dir, { recursive: true });
-	}
-	const isPr = is_pr_review || fs.existsSync(path.join(os.homedir(), '.cache', 'nono', `pr-meta-${process.ppid}.json`));
-	const filename = isPr ? `notes-pr-${process.ppid}.md` : `notes-${process.ppid}.md`;
-	return path.join(notes_dir, filename);
-}
-
 function isStateChangingTool(name) {
 	const read_only_tools = new Set(['list_directory_structure', 'view_file_contents', 'search_grep', 'view_file_git_diff', 'read_terminal_buffer', 'gemini_web_search', 'comment']);
 	return !read_only_tools.has(name);
@@ -916,62 +906,8 @@ function areArgsEqual(args1, args2) {
 	return JSON.stringify(args1) === JSON.stringify(args2);
 }
 
-async function writeSessionNotes({ content }) {
-	const notes_path = getActiveNotesFilePath();
-	try {
-		fs.writeFileSync(notes_path, content, 'utf8');
-		for (const item of active_large_outputs) {
-			item.notes_edited = true;
-		}
-		return {
-			status: 'success',
-			message: `Session notes written successfully to ${notes_path}.`
-		};
-	} catch (err) {
-		return {
-			status: 'error',
-			message: `Failed to write session notes: ${err.message}`
-		};
-	}
-}
-
-async function patchSessionNotes({ search_block, replace_block }) {
-	const notes_path = getActiveNotesFilePath();
-	try {
-		if (!fs.existsSync(notes_path)) {
-			return {
-				status: 'error',
-				message: `Notes file does not exist. Please write the session notes first using write_session_notes.`
-			};
-		}
-		const existing_content = fs.readFileSync(notes_path, 'utf8');
-		if (!existing_content.includes(search_block)) {
-			return {
-				status: 'error',
-				message: `Could not find the search_block in the current notes. Modification failed.`
-			};
-		}
-		const updated_content = existing_content.replace(search_block, replace_block);
-		fs.writeFileSync(notes_path, updated_content, 'utf8');
-		for (const item of active_large_outputs) {
-			item.notes_edited = true;
-		}
-		return {
-			status: 'success',
-			message: `Session notes patched successfully.`
-		};
-	} catch (err) {
-		return {
-			status: 'error',
-			message: `Failed to patch session notes: ${err.message}`
-		};
-	}
-}
-
 // Map tool name to implementation function
 const tools_mapping = {
-	write_session_notes: writeSessionNotes,
-	patch_session_notes: patchSessionNotes,
 	list_directory_structure: listDirectoryStructure,
 	view_file_contents: viewFileContents,
 	write_file: writeFile,
@@ -998,39 +934,6 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 
 const tools_declarations = [
-	{
-		name: 'write_session_notes',
-		description: "Overwrites the entire content of the active session's notes file. Use this for initializing notes, or writing short notes where full overwrites are fast and cost-effective.",
-		parameters: {
-			type: 'OBJECT',
-			properties: {
-				content: {
-					type: 'STRING',
-					description: "The entire new content to write to the session's notes file."
-				}
-			},
-			required: ['content']
-		}
-	},
-	{
-		name: 'patch_session_notes',
-		description:
-			"Performs a deterministic find-and-replace block modification on the active session's notes file. Use this for making fine-grained, token-efficient updates to specific lines, lists, or checklists once the notes file becomes long.",
-		parameters: {
-			type: 'OBJECT',
-			properties: {
-				search_block: {
-					type: 'STRING',
-					description: 'The original exact code or text block to find in the notes file.'
-				},
-				replace_block: {
-					type: 'STRING',
-					description: 'The new code or text block to substitute.'
-				}
-			},
-			required: ['search_block', 'replace_block']
-		}
-	},
 	{
 		name: 'comment',
 		description: 'Outputs a thought, comment, explanation, or progress update to the user. Use this to explain your strategy, status, or plans.',
@@ -1274,7 +1177,7 @@ CRITICAL INSTRUCTIONS:
 - Dry-run validation: After modifying files, the local engine automatically runs dry-run checks (like linting or tsc). Make sure to fix errors if any.
 - If you need to search for code or references, use search_grep.
 - If you need up-to-date web information, use the googleSearch tool.
-- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
+- Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
 - Keep a clean context history. Use the appropriate tools to clean tool outputs that don't seem relevant or usefull anymore for the remaining of the task.
 - Do NOT use emojis, special icons, or graphical characters in your reasoning or output responses. Stick to clean, plain text and standard terminal markdown.
 - Git Safety Protocol: Never use "git add" or "git commit" without explicit user instruction.
@@ -1302,7 +1205,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
-- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
+- Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
 
 Provide your final report as your final text message without calling any more tools.`;
 
@@ -1320,7 +1223,7 @@ Constraints:
 - You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
 - Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". Focus instead on semantic correctness and business logic.
 - Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
-- Session Notes and Large Outputs: You have access to "write_session_notes" and "patch_session_notes" to maintain a freeform scratchpad of notes. Large tool outputs (exceeding detection limits) will be temporarily available in your context but will be purged on the very next non-note-edit tool call. To retain important details or document "dead ends" before they are purged, make sure to write or patch them into your session notes immediately.
+- Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) will be temporarily available in your context for the current turn, but will be purged from the message history on the very next tool call to prevent context bloat. Because your internal thinking/reasoning blocks are stripped from the message history on subsequent turns, you MUST write all critical findings, code snippets, or key details directly in your chat response (comments/explanation to the user) before making your next tool call. This ensures that the essential information is preserved in the active conversation history.
 
 Interaction Flow:
 - You MUST present issues one by one.
@@ -1469,131 +1372,6 @@ async function main() {
 		return;
 	}
 
-	// Handle nono --notes or -n argument
-	if (process.argv[2] === '--notes' || process.argv[2] === '-n') {
-		const notes_path = getActiveNotesFilePath();
-		const notes_dir = path.dirname(notes_path);
-		if (!fs.existsSync(notes_dir)) {
-			fs.mkdirSync(notes_dir, { recursive: true });
-		}
-
-		if (!fs.existsSync(notes_path)) {
-			const initialHeader = `# Session Notes\n\nThis is a freeform scratchpad for the current session.\n`;
-			fs.writeFileSync(notes_path, initialHeader, 'utf8');
-		}
-
-		const editor = process.env.NONO_EDITOR || process.env.VISUAL || process.env.EDITOR || 'nano';
-		const parts = editor.trim().split(/\s+/);
-		const cmd = parts[0];
-		const args = [...parts.slice(1), notes_path];
-
-		let resolved_cmd = cmd;
-		try {
-			resolved_cmd = execSync(`which ${cmd}`, { encoding: 'utf8' }).trim();
-		} catch (e) {
-			// Fallback to original if which fails
-		}
-
-		const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID || !!process.env.KITTY_WINDOW_ID;
-		const is_ptyxis = !!process.env.PTYXIS_VERSION || !!process.env.PTYXIS_PROFILE;
-
-		const term_cmds = [
-			// 1. Ptyxis (GNOME's new default terminal - new tab)
-			{
-				check: () => is_ptyxis,
-				cmd: 'ptyxis',
-				args: ['--tab', '-T', 'Notes', '--', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 2. Kitty (Remote Control - new tab)
-			{
-				check: () => is_kitty,
-				cmd: 'kitty',
-				args: ['@', 'launch', '--type=tab', '--tab-title', 'Notes', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 3. Kitty (Direct - new window/instance)
-			{
-				cmd: 'kitty',
-				args: ['--title', 'Notes', resolved_cmd, ...args],
-				nonBlocking: false
-			},
-			// 4. Ptyxis fallback (new tab)
-			{
-				cmd: 'ptyxis',
-				args: ['--tab', '-T', 'Notes', '--', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 5. GNOME Terminal (new tab)
-			{
-				cmd: 'gnome-terminal',
-				args: ['--tab', '--title=Notes', '--', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 6. GNOME Console (kgx - new tab)
-			{
-				cmd: 'kgx',
-				args: ['--tab', '--', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 7. Konsole (new tab)
-			{
-				cmd: 'konsole',
-				args: ['--new-tab', '-e', resolved_cmd, ...args],
-				nonBlocking: true
-			},
-			// 8. XFCE Terminal (new tab)
-			{
-				cmd: 'xfce4-terminal',
-				args: ['--tab', '-x', resolved_cmd, ...args],
-				nonBlocking: true
-			}
-		];
-
-		function tryTerminals(index) {
-			if (index >= term_cmds.length) {
-				console.log(`No supported terminal emulator succeeded. Spawning in the current terminal instead...`);
-				const child = spawn(resolved_cmd, args, { stdio: 'inherit' });
-				child.on('error', err => {
-					console.error(`Error starting editor:`, err.message);
-					process.exit(1);
-				});
-				child.on('exit', () => process.exit(0));
-				return;
-			}
-
-			const term = term_cmds[index];
-			if (term.check && !term.check()) {
-				tryTerminals(index + 1);
-				return;
-			}
-
-			try {
-				execSync(`which ${term.cmd}`, { stdio: 'ignore' });
-				// Binary exists! Try to launch it.
-				const formattedArgs = term.args.map(arg => JSON.stringify(arg)).join(' ');
-				const full_cmd = `${term.cmd} ${formattedArgs}`;
-
-				if (term.nonBlocking) {
-					execSync(full_cmd, { stdio: 'ignore' });
-					process.exit(0);
-				} else {
-					exec(full_cmd, err => {
-						if (err) {
-							tryTerminals(index + 1);
-						}
-					});
-					setTimeout(() => process.exit(0), 200);
-				}
-			} catch (e) {
-				tryTerminals(index + 1);
-			}
-		}
-
-		tryTerminals(0);
-		return;
-	}
-
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
@@ -1609,7 +1387,6 @@ async function main() {
   nono --resume              List and interactively select previous session context to resume
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
-  nono --notes, -n           Open the current session's notes in your editor
   nono --commit              Generate commit message suggestions for staged edits and commit
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
@@ -3267,21 +3044,11 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				}
 			}
 
-			// Check if any of the requested calls are non-note-edit calls
-			const has_non_note_edit_call = function_calls.some(p => {
-				const name = p.functionCall.name;
-				return name !== 'write_session_notes' && name !== 'patch_session_notes';
-			});
-
-			if (has_non_note_edit_call && active_large_outputs.length > 0) {
+			if (active_large_outputs.length > 0) {
 				for (const item of active_large_outputs) {
-					const message = item.notes_edited
-						? `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters. This tool output resulted in note edits.]`
-						: `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters. This tool output did not result in any note edits.]`;
-
 					item.functionResponse.response = {
 						status: 'success',
-						message: message
+						message: `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters.]`
 					};
 				}
 				// Clear the tracked list as they have been purged
@@ -3304,7 +3071,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				if (last_executed_tool && last_executed_tool.name === name && areArgsEqual(last_executed_tool.args, args)) {
 					result = {
 						status: 'error',
-						error: `Warning: Consecutive identical tool call to "${name}" detected with the exact same parameters. Please check your session notes or vary your query parameters to avoid an infinite loop.`
+						error: `Warning: Consecutive identical tool call to "${name}" detected with the exact same parameters. Please check your previous findings/comments or vary your query parameters to avoid an infinite loop.`
 					};
 				} else {
 					const tool_fn = tools_mapping[name];
@@ -3348,7 +3115,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					};
 				}
 
-				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer' && name !== 'write_session_notes' && name !== 'patch_session_notes') {
+				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer') {
 					const tool_progress = formatToolCallProgress(name, args);
 					const suffix = is_large ? ' \x1b[90m[large]\x1b[0m' : '';
 					const progressLine = formatProgressLine(`• ${tool_progress}${suffix}`);
@@ -3369,8 +3136,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				if (is_large) {
 					active_large_outputs.push({
 						functionResponse: function_response_part.functionResponse,
-						original_length: result_str.length,
-						notes_edited: false
+						original_length: result_str.length
 					});
 				}
 
