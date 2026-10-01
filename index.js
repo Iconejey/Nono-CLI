@@ -139,6 +139,7 @@ let latest_tok_speed = 0;
 let total_candidates_token_count = 0;
 let total_api_duration_ms = 0;
 let is_bottom_line_active = false;
+let bottom_line_extra_lines = 0;
 let latest_vllm_stats = null;
 
 const original_stdout_write = process.stdout.write.bind(process.stdout);
@@ -236,6 +237,9 @@ let vllm_tick_speeds = [];
 
 function drawBottomLine() {
 	if (!ai && !openai) return;
+	if (is_bottom_line_active) {
+		clearBottomLine();
+	}
 	let current_tokens = latest_context_size || 0;
 	let token_limit = use_vllm ? vllm_max_context : parseInt(process.env.NONO_SUMMARIZE_TOKEN_LIMIT, 10) || 40000;
 
@@ -301,14 +305,42 @@ function drawBottomLine() {
 	}
 
 	const line = `\x1b[90m${parts.join(' | ')}${suffix}\x1b[0m`;
-	original_stdout_write('\r\x1b[K' + line);
+
+	const task_lines = [];
+	try {
+		const todos = getTodosSync();
+		for (const todo of todos) {
+			let colorCode = '\x1b[34m'; // Blue (pending/default)
+			if (todo.status === 'in_progress') {
+				colorCode = '\x1b[33m'; // Yellow
+			} else if (todo.status === 'completed') {
+				colorCode = '\x1b[32m'; // Green
+			}
+			task_lines.push(`${colorCode}• ${todo.task}\x1b[0m`);
+		}
+	} catch (e) {
+		// Ignore
+	}
+
+	let output = line;
+	if (task_lines.length > 0) {
+		output += '\n' + task_lines.join('\n');
+	}
+
+	original_stdout_write('\r\x1b[K' + output);
 	is_bottom_line_active = true;
+	bottom_line_extra_lines = task_lines.length;
 }
 
 function clearBottomLine() {
 	if (is_bottom_line_active) {
-		original_stdout_write('\r\x1b[K');
+		if (bottom_line_extra_lines > 0) {
+			original_stdout_write(`\r\x1b[${bottom_line_extra_lines}A\x1b[J`);
+		} else {
+			original_stdout_write('\r\x1b[K');
+		}
 		is_bottom_line_active = false;
+		bottom_line_extra_lines = 0;
 	}
 }
 
@@ -897,6 +929,25 @@ async function finalAnswerTool({ response }) {
 	};
 }
 
+let cached_todos = null;
+
+function getTodosSync() {
+	if (cached_todos !== null) {
+		return cached_todos;
+	}
+	const todo_path = getActiveTodoFilePath();
+	if (fs.existsSync(todo_path)) {
+		try {
+			cached_todos = JSON.parse(fs.readFileSync(todo_path, 'utf8'));
+		} catch (e) {
+			cached_todos = [];
+		}
+	} else {
+		cached_todos = [];
+	}
+	return cached_todos;
+}
+
 function getActiveTodoFilePath() {
 	const todo_dir = path.join(os.homedir(), '.cache', 'nono', 'todo');
 	if (!fs.existsSync(todo_dir)) {
@@ -941,6 +992,7 @@ async function addTodoItem({ task }) {
 	};
 	todos.push(new_item);
 	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	cached_todos = null;
 	return {
 		status: 'success',
 		message: `Added todo item: "${task}" (ID: ${new_item.id})`
@@ -973,6 +1025,7 @@ async function updateTodoItem({ id, status }) {
 	}
 	item.status = status;
 	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	cached_todos = null;
 	return {
 		status: 'success',
 		message: `Updated todo item ID "${id}" to status "${status}".`
@@ -1005,6 +1058,7 @@ async function removeTodoItem({ id }) {
 	}
 	const removed = todos.splice(index, 1);
 	fs.writeFileSync(todo_path, JSON.stringify(todos, null, 2), 'utf8');
+	cached_todos = null;
 	return {
 		status: 'success',
 		message: `Removed todo item: "${removed[0].task}" (ID: ${id})`
@@ -1539,26 +1593,6 @@ async function main() {
 		return;
 	}
 
-	// Handle nono --todo argument
-	if (process.argv[2] === '--todo') {
-		const todo_path = getActiveTodoFilePath();
-		const todo_dir = path.dirname(todo_path);
-		if (!fs.existsSync(todo_dir)) {
-			fs.mkdirSync(todo_dir, { recursive: true });
-		}
-
-		if (!fs.existsSync(todo_path)) {
-			fs.writeFileSync(todo_path, '[]', 'utf8');
-		}
-
-		const watcher_script_path = path.join(dir_name, 'src', 'scripts', 'todo-watcher.js');
-		const resolved_cmd = process.execPath;
-		const args = [watcher_script_path, todo_path];
-
-		spawnInNewTerminalTab('Nono TODO', resolved_cmd, args);
-		return;
-	}
-
 	// Handle nono --help or -h argument
 	if (process.argv[2] === '--help' || process.argv[2] === '-h') {
 		console.log(`
@@ -1574,7 +1608,6 @@ async function main() {
   nono --resume              List and interactively select previous session context to resume
   nono --list-instructions   List the path of each nono.md file that will be used in the current folder
   nono --add-instructions    Create an empty nono.md file and open it in VS Code
-  nono --todo                Open and watch the active session's TODO list in a new terminal tab
   nono --commit              Generate commit message suggestions for staged edits and commit
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
@@ -1645,6 +1678,15 @@ async function main() {
 			}
 			if (fs.existsSync(details_file)) {
 				fs.unlinkSync(details_file);
+			}
+			const todo_dir = path.join(os.homedir(), '.cache', 'nono', 'todo');
+			const todo_path = path.join(todo_dir, `todo-${process.ppid}.json`);
+			const todo_pr_path = path.join(todo_dir, `todo-pr-${process.ppid}.json`);
+			if (fs.existsSync(todo_path)) {
+				fs.unlinkSync(todo_path);
+			}
+			if (fs.existsSync(todo_pr_path)) {
+				fs.unlinkSync(todo_pr_path);
 			}
 			if (fs.existsSync(pr_meta_path)) {
 				try {
@@ -1856,6 +1898,8 @@ async function main() {
 							const verb = name === 'write_file' ? 'Writing' : 'Patching';
 							const progressLine = formatProgressLine(`• ${verb} ${baseName} \x1b[31m-${deleted}\x1b[90m \x1b[32m+${added}\x1b[90m`);
 							console.log(progressLine);
+						} else if (name === 'add_todo_item' || name === 'update_todo_item') {
+							// skip logging
 						} else {
 							const tool_progress = formatToolCallProgress(name, args);
 							const progressLine = formatProgressLine(`• ${tool_progress}`);
@@ -3303,7 +3347,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 					};
 				}
 
-				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer') {
+				if (name !== 'write_file' && name !== 'patch_file' && name !== 'comment' && name !== 'final_answer' && name !== 'add_todo_item' && name !== 'update_todo_item') {
 					const tool_progress = formatToolCallProgress(name, args);
 					const suffix = is_large ? ' \x1b[90m[large]\x1b[0m' : '';
 					const progressLine = formatProgressLine(`• ${tool_progress}${suffix}`);
