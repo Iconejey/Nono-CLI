@@ -53,6 +53,8 @@ const default_volume = process.env.NONO_VOLUME ? parseFloat(process.env.NONO_VOL
 const volume_scale = isNaN(default_volume) ? 0.6 : Math.max(0, Math.min(1, default_volume));
 const default_large_output_detection_limit = process.env.LARGE_OUTPUT_DETECTION_LIMIT ? parseInt(process.env.LARGE_OUTPUT_DETECTION_LIMIT, 10) : 1000;
 const large_output_detection_limit = isNaN(default_large_output_detection_limit) ? 1000 : default_large_output_detection_limit;
+const default_large_output_turns = process.env.LARGE_OUTPUT_TURNS ? parseInt(process.env.LARGE_OUTPUT_TURNS, 10) : 4;
+const large_output_turns = isNaN(default_large_output_turns) ? 4 : default_large_output_turns;
 const default_large_output_truncation_limit = process.env.LARGE_OUTPUT_TRUNCATION_LIMIT ? parseInt(process.env.LARGE_OUTPUT_TRUNCATION_LIMIT, 10) : 25000;
 const large_output_truncation_limit = isNaN(default_large_output_truncation_limit) ? 25000 : default_large_output_truncation_limit;
 const default_thought_limit = process.env.NONO_THOUGHT_LIMIT ? parseInt(process.env.NONO_THOUGHT_LIMIT, 10) : 120;
@@ -3277,14 +3279,19 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			if (active_large_outputs.length > 0) {
+				const remaining_large_outputs = [];
 				for (const item of active_large_outputs) {
-					item.functionResponse.response = {
-						status: 'success',
-						message: `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters.]`
-					};
+					item.turns_remaining--;
+					if (item.turns_remaining <= 0) {
+						item.functionResponse.response = {
+							status: 'success',
+							message: `[Tool output discarded from history to avoid context bloat. Original length: ${item.original_length} characters.]`
+						};
+					} else {
+						remaining_large_outputs.push(item);
+					}
 				}
-				// Clear the tracked list as they have been purged
-				active_large_outputs = [];
+				active_large_outputs = remaining_large_outputs;
 			}
 
 			// Execute requested functions sequentially to prevent interleaved console logs & cursor corruption
@@ -3368,7 +3375,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				if (is_large) {
 					active_large_outputs.push({
 						functionResponse: function_response_part.functionResponse,
-						original_length: result_str.length
+						original_length: result_str.length,
+						turns_remaining: large_output_turns
 					});
 				}
 
