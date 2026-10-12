@@ -580,6 +580,11 @@ function findSessionModelMessages() {
 				const modelTexts = [];
 				for (const msg of history) {
 					if (msg && msg.role === 'model' && Array.isArray(msg.parts)) {
+						const finalAnswerCall = msg.parts.find(p => p.functionCall && p.functionCall.name === 'final_answer' && p.functionCall.args && p.functionCall.args.response);
+						if (finalAnswerCall) {
+							modelTexts.push(finalAnswerCall.functionCall.args.response.trim());
+							continue;
+						}
 						const textPart = msg.parts.find(p => p.text);
 						if (textPart && textPart.text.trim()) {
 							modelTexts.push(textPart.text.trim());
@@ -595,6 +600,30 @@ function findSessionModelMessages() {
 		}
 	}
 	return [];
+}
+
+function copyToClipboard(text) {
+	if (!text) return false;
+	const commands = [
+		{ cmd: 'wl-copy', args: [] },
+		{ cmd: 'xclip', args: ['-selection', 'clipboard'] },
+		{ cmd: 'xsel', args: ['-b', '-i'] },
+		{ cmd: 'pbcopy', args: [] },
+		{ cmd: 'clip.exe', args: [] },
+		{ cmd: 'clip', args: [] }
+	];
+
+	for (const { cmd, args } of commands) {
+		try {
+			const res = spawnSync(cmd, args, { input: text, encoding: 'utf8', stdio: ['pipe', 'ignore', 'ignore'] });
+			if (res.status === 0) {
+				return true;
+			}
+		} catch (e) {
+			// ignore and try next
+		}
+	}
+	return false;
 }
 
 function updateProgress(raw_text, color) {
@@ -1616,6 +1645,7 @@ async function main() {
   nono --details             Open the logs and details of the current session in VS Code
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
   nono --raw                 Print the last final message in raw markdown with syntax highlighting
+  nono --copy                Copy the markdown code of the last final message/answer to the clipboard
   
   nono --help, -h            Show this help information
 `);
@@ -2076,6 +2106,27 @@ fix: resolve null pointer exception in checkout flow`;
 			console.error('\x1b[31mError: No previous final message found in session history.\x1b[0m');
 			process.exit(1);
 		}
+		return;
+	}
+
+	// Handle nono --copy argument
+	if (process.argv[2] === '--copy' || process.argv[2] === '-copy') {
+		const messages = findSessionModelMessages();
+		if (messages.length > 0) {
+			const lastAnswer = cleanModelText(messages[messages.length - 1]).trim();
+			if (lastAnswer) {
+				const success = copyToClipboard(lastAnswer);
+				if (success) {
+					console.log('\x1b[32m✔ Copied the last final answer to clipboard!\x1b[0m');
+					process.exit(0);
+				} else {
+					console.error('\x1b[31mError: Failed to copy to clipboard.\x1b[0m');
+					process.exit(1);
+				}
+			}
+		}
+		console.error('\x1b[31mError: No previous final message found in session history.\x1b[0m');
+		process.exit(1);
 		return;
 	}
 
