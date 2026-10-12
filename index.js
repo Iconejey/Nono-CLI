@@ -12,7 +12,7 @@ import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToG
 import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
 import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable, spawnInNewTerminalTab } from './src/utils/terminal.js';
-import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, highlightRawMarkdown, formatTodoListToMarkdown } from './src/utils/markdown.js';
+import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, formatTodoListToMarkdown } from './src/utils/markdown.js';
 import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
 import { findCorrespondingCall, matchesTarget, discardSpecificOutput, discardLastSteps } from './src/utils/history.js';
 
@@ -1644,7 +1644,6 @@ async function main() {
   nono --verbose             Show the whole raw vLLM responses
   nono --details             Open the logs and details of the current session in VS Code
   nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
-  nono --raw                 Print the last final message in raw markdown with syntax highlighting
   nono --copy                Copy the markdown code of the last final message/answer to the clipboard
   
   nono --help, -h            Show this help information
@@ -2084,29 +2083,6 @@ fix: resolve null pointer exception in checkout flow`;
 			console.error(`No details log found for this terminal session.`);
 			process.exit(1);
 		}
-	}
-
-	// Handle nono --raw argument
-	if (process.argv[2] === '--raw') {
-		const messages = findSessionModelMessages();
-		if (messages.length > 0) {
-			try {
-				const highlightedMessages = [];
-				for (const msg of messages) {
-					const highlighted = await highlightRawMarkdown(msg);
-					highlightedMessages.push(highlighted);
-				}
-				console.log(highlightedMessages.join('\n\n'));
-			} catch (err) {
-				// Fallback to plain text if highlighting fails
-				console.log(messages.join('\n\n'));
-			}
-			process.exit(0);
-		} else {
-			console.error('\x1b[31mError: No previous final message found in session history.\x1b[0m');
-			process.exit(1);
-		}
-		return;
 	}
 
 	// Handle nono --copy argument
