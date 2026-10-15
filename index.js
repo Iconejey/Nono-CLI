@@ -1441,28 +1441,7 @@ Guidelines:
 - Always specify the language name (e.g., \`\`\`javascript, \`\`\`python, \`\`\`bash) when writing a markdown code block to ensure proper terminal syntax highlighting.
 `;
 
-let pr_review_system_prompt = `You are Nono, a codebase-aware Pull Request Reviewer.
-You are running in a temporary clone of the repository.
-
-Your objectives:
-1. Identify the changed files and overall repository diff from your initial prompt context.
-2. Use "view_file_git_diff" (preferably without a file_path to fetch all changes at once in a single call) to see the specific code changes.
-3. Keep the analysis highly focused and light-weight: do NOT use "search_grep" or "view_file_contents" to trace dependencies unless you suspect a high-impact bug, architectural regression, or API misalignment.
-4. Focus on deep code logic, API consistency, performance issues, architectural alignments, or potential logical bugs.
-5. Identify potential bugs, logical issues, or regression risks.
-6. Compile a comprehensive, professional PR review report in Markdown format.
-
-Constraints:
-- You must NOT modify any files (avoid "write_file" or "patch_file" unless absolutely necessary or requested).
-- Do NOT run automated static checks (like ESLint, Prettier, or style formatters) using "execute_system_command". These checks are already done by the GitHub CI/Actions pipeline. Focus instead on semantic correctness and business logic.
-- Focus on high-impact feedback. Ignore lockfiles as they are filtered out.
-- Large Outputs and Information Retention: Large tool outputs (exceeding detection limits) remain in context history for ${large_output_turns} turns before being purged to manage context space. Because internal reasoning/thinking blocks are stripped from the message history on subsequent turns, you MUST explicitly document all critical findings, key details, code snippets, or full spec contents directly in your chat response before making your next tool call to ensure essential information is preserved permanently in the active conversation history.
-- CRITICAL NON-HALLUCINATION REQUIREMENT: When tool outputs are purged (replaced with "[Tool output discarded...]"), or if details are no longer present in your active context, NEVER guess, assume, or hallucinate facts, code, or specs. If you are missing information or are unsure because output was purged, you MUST either re-read the file / re-run the tool to bring it back into context, or explicitly state what information needs to be retrieved rather than guessing.
-- Task Tracking and TODO List: For any complex, debugging, implementation, or multi-step task, you MUST initialize a structured TODO list using "add_todo_item" on your very first step. As you work, you must update the status of these tasks using "update_todo_item" (marking them "in_progress" or "completed") to track your progress and let the user see your roadmap in real-time. Do NOT remove or delete completed tasks at the end of the task—keep them in the list so the user has a full, checkmarked record of your completed roadmap. Only use "remove_todo_item" if a task was added by mistake or is no longer relevant to the objective. The active list is automatically appended to your system instructions on every turn so you never lose track of your progress. For small, simple, or single-step tasks, you can skip the TODO list.
-
-Provide your final report as your final text message without calling any more tools.`;
-
-let pr_review_comment_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
+let pr_review_system_prompt = `You are Nono, performing an expert, codebase-aware Pull Request Review.
 You are running in a temporary clone of the repository.
 
 Your objectives:
@@ -1518,7 +1497,6 @@ if (nonoFiles.length > 0) {
 	customInstructions += '=========================================\n';
 	system_prompt += customInstructions;
 	pr_review_system_prompt += customInstructions;
-	pr_review_comment_system_prompt += customInstructions;
 }
 
 // ----------------------------------------------------
@@ -1588,7 +1566,6 @@ async function main() {
 	let pr_review_base_branch = '';
 	let pr_review_temp_dir = '';
 	let user_query = '';
-	let isCommentMode = false;
 	let isAutoMode = false;
 	const prComments = [];
 	let lastIssueJson = null;
@@ -1646,7 +1623,7 @@ async function main() {
   nono --gemini              Force using the Gemini API even if VLLM is configured
   nono --verbose             Show the whole raw vLLM responses
   nono --details             Open the logs and details of the current session in VS Code
-  nono --pr-review [url] [--comment] [--auto] Run a GitHub PR review on the specified PR URL, optionally with interactive comment selection or automatic submission
+  nono --pr-review [url] [--auto] Run a GitHub PR review on the specified PR URL, with interactive comment selection or automatic submission
   nono --copy                Copy the markdown code of the last final message/answer to the clipboard
   
   nono --help, -h            Show this help information
@@ -2115,12 +2092,11 @@ fix: resolve null pointer exception in checkout flow`;
 		const prUrl = process.argv[3];
 		if (!prUrl) {
 			console.error('\x1b[31mError: Pull request URL is required.\x1b[0m');
-			console.error('Usage: nono --pr-review <github-pr-url> [--comment] [--auto]');
+			console.error('Usage: nono --pr-review <github-pr-url> [--auto]');
 			playChime('error');
 			process.exit(1);
 		}
 
-		isCommentMode = process.argv.includes('--comment') || process.argv.includes('--auto');
 		isAutoMode = process.argv.includes('--auto');
 
 		const match = prUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
@@ -2246,8 +2222,7 @@ fix: resolve null pointer exception in checkout flow`;
 			}
 
 			is_pr_review = true;
-			if (isCommentMode) {
-				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
+			user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
 Title: ${prTitle}
 Author: ${prAuthor}
 Base branch: ${pr_review_base_branch}
@@ -2262,23 +2237,6 @@ ${repoDiff || 'No differences found.'}
 \`\`\`
 ${diffContext}
 Analyze the changed files, identify potential bugs or logic errors, and present the first issue you find. Remember to output the JSON block with the file path, line number, and message for this issue.`;
-			} else {
-				user_query = `Perform a pull request review for the Github Pull Request: ${owner}/${repo}#${pullNumber}.
-Title: ${prTitle}
-Author: ${prAuthor}
-Base branch: ${pr_review_base_branch}
-Compare branch: ${compareBranch}
-
-Here is the list of changed files in this PR (excluding lockfiles):
-${filteredFiles.map(f => `- ${f.filename} (+${f.additions} -${f.deletions})`).join('\n')}
-
-Here is the status of modified files against the base branch:
-\`\`\`
-${repoDiff || 'No differences found.'}
-\`\`\`
-${diffContext}
-Analyze the changed files, trace references in the codebase, and write your final PR review report in Markdown format.`;
-			}
 
 			// Save metadata to support subsequent follow-up commands in the same shell
 			const prMetaPath = path.join(cache_dir, `pr-meta-${process.ppid}.json`);
@@ -2921,7 +2879,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 				try {
 					const start_api_time = Date.now();
 					if (use_vllm) {
-						const systemInstruction = getSystemInstructionWithTodo(is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt);
+						const systemInstruction = getSystemInstructionWithTodo(is_initial_pr_review ? pr_review_system_prompt : system_prompt);
 						const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
 						const base_tools = is_initial_pr_review
 							? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
@@ -3025,7 +2983,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 							model: model_name,
 							contents: history,
 							config: {
-								systemInstruction: getSystemInstructionWithTodo(is_initial_pr_review ? (isCommentMode ? pr_review_comment_system_prompt : pr_review_system_prompt) : system_prompt),
+								systemInstruction: getSystemInstructionWithTodo(is_initial_pr_review ? pr_review_system_prompt : system_prompt),
 								tools: [
 									{
 										functionDeclarations: (is_initial_pr_review
@@ -3151,7 +3109,7 @@ Analyze the changed files, trace references in the codebase, and write your fina
 			}
 
 			if (!has_function_calls) {
-				if (isCommentMode) {
+				if (is_pr_review) {
 					clearProgress();
 
 					const text = text_part ? text_part.text : '';
@@ -3444,8 +3402,8 @@ Analyze the changed files, trace references in the codebase, and write your fina
 		}
 	}
 
-	// Post comments to GitHub Review if comment mode is active
-	if (isCommentMode) {
+	// Post comments to GitHub Review if reviewing a PR
+	if (is_pr_review) {
 		if (prComments.length > 0) {
 			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post.\x1b[0m\n`);
 			let shouldPost = false;
