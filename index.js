@@ -1116,70 +1116,20 @@ async function reportPrIssue(args) {
 	}
 
 	clearProgress();
-	const severityStr = severity ? `**[${String(severity).toUpperCase()}]** ` : '';
-	console.log(`\n\x1b[36m✦ Proposed Comment for ${file}:${line}\x1b[0m`);
-	if (severity) {
-		console.log(`\x1b[33mSeverity:\x1b[0m ${severity}`);
-	}
-	console.log(`\x1b[33mMessage:\x1b[0m ${message}\n`);
+	const sev = severity ? String(severity).toLowerCase() : 'note';
+	pendingPrIssues.push({
+		file,
+		line: parseInt(line, 10),
+		severity: sev,
+		message
+	});
 
-	if (isAutoMode) {
-		const commentBody = `${severityStr}${message}`;
-		prComments.push({
-			path: file,
-			line: parseInt(line, 10),
-			body: commentBody
-		});
-		console.log(`\x1b[32mAuto-accepted comment for ${file}:${line}.\x1b[0m\n`);
-		return {
-			status: 'success',
-			user_action: 'accepted',
-			message: `User accepted comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
-		};
-	}
+	console.log(`\x1b[36m✦ [PR Issue Recorded #${pendingPrIssues.length}]\x1b[0m \x1b[1m${file}:${line}\x1b[0m (${sev}) - ${message}`);
 
-	while (true) {
-		const choice = await askUser('Choose action: [c]omment, [s]kip, [w]rite custom prompt, [q]uit: ');
-		const lower = choice.trim().toLowerCase();
-		if (lower === 'c' || lower === 'comment') {
-			const commentBody = `${severityStr}${message}`;
-			prComments.push({
-				path: file,
-				line: parseInt(line, 10),
-				body: commentBody
-			});
-			console.log(`\x1b[32mSaved comment for ${file}:${line}.\x1b[0m\n`);
-			return {
-				status: 'success',
-				user_action: 'commented',
-				message: `User accepted and saved comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
-			};
-		} else if (lower === 's' || lower === 'skip') {
-			console.log(`\x1b[90mSkipped comment for ${file}:${line}.\x1b[0m\n`);
-			return {
-				status: 'success',
-				user_action: 'skipped',
-				message: `User skipped comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
-			};
-		} else if (lower === 'w' || lower === 'write') {
-			const promptText = await askUser('Enter your prompt / question: ');
-			return {
-				status: 'user_feedback',
-				user_input: promptText,
-				message: `User provided feedback/question regarding ${file}:${line}: "${promptText}". Please answer their question or adjust the issue accordingly.`
-			};
-		} else if (lower === 'q' || lower === 'quit') {
-			prReviewFinished = true;
-			console.log('\x1b[33mExiting PR review loop.\x1b[0m\n');
-			return {
-				status: 'success',
-				user_action: 'quit',
-				message: 'User chose to quit the review loop.'
-			};
-		} else {
-			console.log('\x1b[31mInvalid choice. Please enter c, s, w, or q.\x1b[0m');
-		}
-	}
+	return {
+		status: 'success',
+		message: `Issue #${pendingPrIssues.length} for ${file}:${line} recorded. Continue analyzing remaining files or call "finish_pr_review" if finished.`
+	};
 }
 
 async function finishPrReview(args) {
@@ -1693,6 +1643,7 @@ async function main() {
 	let user_query = '';
 	let isAutoMode = false;
 	const prComments = [];
+	const pendingPrIssues = [];
 	let prReviewFinished = false;
 	let prOwner = '';
 	let prRepo = '';
@@ -3430,8 +3381,70 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 
 	// Post comments to GitHub Review if reviewing a PR
 	if (is_pr_review) {
+		clearProgress();
+		if (pendingPrIssues.length === 0) {
+			console.log('\n\x1b[32m✦ Review complete. No issues were reported by Nono.\x1b[0m\n');
+		} else {
+			console.log(`\n\x1b[35m✦ PR Review Complete. ${pendingPrIssues.length} issue(s) reported by Nono.\x1b[0m\n`);
+
+			for (let i = 0; i < pendingPrIssues.length; i++) {
+				const issue = pendingPrIssues[i];
+				const severityStr = issue.severity ? `**[${String(issue.severity).toUpperCase()}]** ` : '';
+
+				console.log(`\x1b[36m--------------------------------------------------\x1b[0m`);
+				console.log(`\x1b[1mIssue ${i + 1}/${pendingPrIssues.length}\x1b[0m`);
+				console.log(`  \x1b[33mFile:\x1b[0m ${issue.file}:${issue.line}`);
+				console.log(`  \x1b[33mSeverity:\x1b[0m ${issue.severity}`);
+				console.log(`  \x1b[33mMessage:\x1b[0m ${issue.message}`);
+				console.log(`\x1b[36m--------------------------------------------------\x1b[0m\n`);
+
+				if (isAutoMode) {
+					prComments.push({
+						path: issue.file,
+						line: issue.line,
+						body: `${severityStr}${issue.message}`
+					});
+					console.log(`\x1b[32mAuto-accepted comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
+				} else {
+					let accepted = false;
+					while (!accepted) {
+						const answer = await askUser('Choose action: [c]omment, [s]kip, [e]dit message, [q]uit review: ');
+						const choice = answer.trim().toLowerCase();
+						if (choice === 'c' || choice === 'comment') {
+							prComments.push({
+								path: issue.file,
+								line: issue.line,
+								body: `${severityStr}${issue.message}`
+							});
+							console.log(`\x1b[32mSaved comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
+							accepted = true;
+						} else if (choice === 's' || choice === 'skip') {
+							console.log(`\x1b[90mSkipped comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
+							accepted = true;
+						} else if (choice === 'e' || choice === 'edit') {
+							const customMsg = await askUser(`Edit comment message [default: ${issue.message}]: `);
+							const finalMsg = customMsg.trim() || issue.message;
+							prComments.push({
+								path: issue.file,
+								line: issue.line,
+								body: `${severityStr}${finalMsg}`
+							});
+							console.log(`\x1b[32mSaved edited comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
+							accepted = true;
+						} else if (choice === 'q' || choice === 'quit') {
+							console.log('\x1b[33mExiting remaining issues review.\x1b[0m\n');
+							i = pendingPrIssues.length;
+							accepted = true;
+						} else {
+							console.log('\x1b[31mInvalid choice. Please enter c, s, e, or q.\x1b[0m');
+						}
+					}
+				}
+			}
+		}
+
 		if (prComments.length > 0) {
-			console.log(`\n\x1b[35m✦ Review complete. You have selected ${prComments.length} comment(s) to post.\x1b[0m\n`);
+			console.log(`\n\x1b[35m✦ You have selected ${prComments.length} comment(s) to post to GitHub.\x1b[0m\n`);
 			let shouldPost = false;
 			if (isAutoMode) {
 				shouldPost = true;
