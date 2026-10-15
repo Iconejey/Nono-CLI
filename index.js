@@ -889,6 +889,87 @@ function runInteractiveSudo() {
 global.askUserInRoll = askUserInRoll;
 global.runInteractiveSudo = runInteractiveSudo;
 
+async function openInEditor(initialContent, filename) {
+	const tempPath = path.join(os.tmpdir(), filename);
+	try {
+		fs.writeFileSync(tempPath, initialContent || '', 'utf8');
+		await new Promise((resolve, reject) => {
+			const editors = [];
+			if (process.env.NONO_EDITOR) {
+				editors.push(process.env.NONO_EDITOR);
+			} else {
+				if (process.env.VISUAL) editors.push(process.env.VISUAL);
+				if (process.env.EDITOR) editors.push(process.env.EDITOR);
+				for (const fallback of ['vim', 'vi', 'nano']) {
+					if (!editors.includes(fallback)) {
+						editors.push(fallback);
+					}
+				}
+			}
+
+			let editorIndex = 0;
+
+			function trySpawn() {
+				if (editorIndex >= editors.length) {
+					reject(new Error(`None of the editors (${editors.join(', ')}) could be started.`));
+					return;
+				}
+
+				const editor = editors[editorIndex];
+				const parts = editor.trim().split(/\s+/);
+				const cmd = parts[0];
+				const args = [...parts.slice(1), tempPath];
+
+				const child = spawn(cmd, args, { stdio: 'inherit' });
+				let completed = false;
+
+				child.on('error', err => {
+					if (completed) return;
+					completed = true;
+					if (err.code === 'ENOENT') {
+						editorIndex++;
+						trySpawn();
+					} else {
+						reject(err);
+					}
+				});
+
+				child.on('close', code => {
+					if (completed) return;
+					completed = true;
+					if (code === 0) {
+						resolve();
+					} else if (code === 127) {
+						editorIndex++;
+						trySpawn();
+					} else {
+						reject(new Error(`Editor (${cmd}) exited with code ${code}`));
+					}
+				});
+			}
+
+			trySpawn();
+		});
+
+		let content = '';
+		if (fs.existsSync(tempPath)) {
+			content = fs.readFileSync(tempPath, 'utf8');
+			try {
+				fs.unlinkSync(tempPath);
+			} catch (e) {}
+		}
+		return content;
+	} catch (err) {
+		try {
+			if (fs.existsSync(tempPath)) {
+				fs.unlinkSync(tempPath);
+			}
+		} catch (e) {}
+		console.error(`\x1b[31mError opening editor: ${err.message}\x1b[0m`);
+		return '';
+	}
+}
+
 // ----------------------------------------------------
 // Tool Implementations
 // ----------------------------------------------------
@@ -2765,87 +2846,15 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 		if (!promptArgs.trim()) {
 			const cwd = process.cwd();
 			const dirName = path.basename(cwd).replaceAll(' ', '_');
-			const tempPath = path.join(os.tmpdir(), `nono_prompt_${Date.now()}_${dirName}.md`);
+			const filename = `nono_prompt_${Date.now()}_${dirName}.md`;
 			try {
-				fs.writeFileSync(tempPath, combined_context, 'utf8');
-				await new Promise((resolve, reject) => {
-					const editors = [];
-					if (process.env.NONO_EDITOR) {
-						editors.push(process.env.NONO_EDITOR);
-					} else {
-						if (process.env.VISUAL) editors.push(process.env.VISUAL);
-						if (process.env.EDITOR) editors.push(process.env.EDITOR);
-						for (const fallback of ['vim', 'vi', 'nano']) {
-							if (!editors.includes(fallback)) {
-								editors.push(fallback);
-							}
-						}
-					}
-
-					let editorIndex = 0;
-
-					function trySpawn() {
-						if (editorIndex >= editors.length) {
-							reject(new Error(`None of the editors (${editors.join(', ')}) could be started.`));
-							return;
-						}
-
-						const editor = editors[editorIndex];
-						const parts = editor.trim().split(/\s+/);
-						const cmd = parts[0];
-						const args = [...parts.slice(1), tempPath];
-
-						const child = spawn(cmd, args, { stdio: 'inherit' });
-						let completed = false;
-
-						child.on('error', err => {
-							if (completed) return;
-							completed = true;
-							if (err.code === 'ENOENT') {
-								editorIndex++;
-								trySpawn();
-							} else {
-								reject(err);
-							}
-						});
-
-						child.on('close', code => {
-							if (completed) return;
-							completed = true;
-							if (code === 0) {
-								resolve();
-							} else if (code === 127) {
-								editorIndex++;
-								trySpawn();
-							} else {
-								reject(new Error(`Editor (${cmd}) exited with code ${code}`));
-							}
-						});
-					}
-
-					trySpawn();
-				});
-				if (fs.existsSync(tempPath)) {
-					let rawQuery = fs.readFileSync(tempPath, 'utf8');
-					// Strip the HTML comment header injected by the editor
-					rawQuery = rawQuery.replace(/^<!-- Current directory: .*\nType your prompt below :\n-->\n?/s, '');
-					user_query = rawQuery.trim();
-					used_editor = true;
-					try {
-						fs.unlinkSync(tempPath);
-					} catch (e) {
-						// Ignore cleanup errors
-					}
-				}
+				let rawQuery = await openInEditor(combined_context, filename);
+				// Strip the HTML comment header injected by the editor
+				rawQuery = rawQuery.replace(/^<!-- Current directory: .*\nType your prompt below :\n-->\n?/s, '');
+				user_query = rawQuery.trim();
+				used_editor = true;
 			} catch (err) {
-				try {
-					if (fs.existsSync(tempPath)) {
-						fs.unlinkSync(tempPath);
-					}
-				} catch (e) {
-					// Ignore cleanup errors
-				}
-				console.error(`\x1b[31mError opening/reading temp file in editor: ${err.message}\x1b[0m`);
+				console.error(`\x1b[31mError opening editor: ${err.message}\x1b[0m`);
 				process.exit(1);
 			}
 
@@ -3389,55 +3398,39 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 
 			for (let i = 0; i < pendingPrIssues.length; i++) {
 				const issue = pendingPrIssues[i];
-				const severityStr = issue.severity ? `**[${String(issue.severity).toUpperCase()}]** ` : '';
+				const sev = (issue.severity || 'note').toLowerCase();
+				const sanitizedFile = issue.file.replaceAll('/', '_').replaceAll('\\', '_');
+				const filename = `nono-pr-${sev}-${sanitizedFile}_${issue.line}.md`;
 
 				console.log(`\x1b[36m--------------------------------------------------\x1b[0m`);
 				console.log(`\x1b[1mIssue ${i + 1}/${pendingPrIssues.length}\x1b[0m`);
 				console.log(`  \x1b[33mFile:\x1b[0m ${issue.file}:${issue.line}`);
-				console.log(`  \x1b[33mSeverity:\x1b[0m ${issue.severity}`);
-				console.log(`  \x1b[33mMessage:\x1b[0m ${issue.message}`);
+				console.log(`  \x1b[33mSeverity:\x1b[0m ${sev}`);
 				console.log(`\x1b[36m--------------------------------------------------\x1b[0m\n`);
 
 				if (isAutoMode) {
-					prComments.push({
-						path: issue.file,
-						line: issue.line,
-						body: `${severityStr}${issue.message}`
-					});
-					console.log(`\x1b[32mAuto-accepted comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
+					if (issue.message && issue.message.trim()) {
+						prComments.push({
+							path: issue.file,
+							line: issue.line,
+							body: issue.message.trim()
+						});
+						console.log(`\x1b[32m✓ Auto-accepted comment for ${issue.file}:${issue.line}\x1b[0m\n`);
+					}
 				} else {
-					let accepted = false;
-					while (!accepted) {
-						const answer = await askUser('Choose action: [c]omment, [s]kip, [e]dit message, [q]uit review: ');
-						const choice = answer.trim().toLowerCase();
-						if (choice === 'c' || choice === 'comment') {
-							prComments.push({
-								path: issue.file,
-								line: issue.line,
-								body: `${severityStr}${issue.message}`
-							});
-							console.log(`\x1b[32mSaved comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
-							accepted = true;
-						} else if (choice === 's' || choice === 'skip') {
-							console.log(`\x1b[90mSkipped comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
-							accepted = true;
-						} else if (choice === 'e' || choice === 'edit') {
-							const customMsg = await askUser(`Edit comment message [default: ${issue.message}]: `);
-							const finalMsg = customMsg.trim() || issue.message;
-							prComments.push({
-								path: issue.file,
-								line: issue.line,
-								body: `${severityStr}${finalMsg}`
-							});
-							console.log(`\x1b[32mSaved edited comment for ${issue.file}:${issue.line}.\x1b[0m\n`);
-							accepted = true;
-						} else if (choice === 'q' || choice === 'quit') {
-							console.log('\x1b[33mExiting remaining issues review.\x1b[0m\n');
-							i = pendingPrIssues.length;
-							accepted = true;
-						} else {
-							console.log('\x1b[31mInvalid choice. Please enter c, s, e, or q.\x1b[0m');
-						}
+					console.log(`\x1b[90mOpening issue in editor (${filename})...\x1b[0m`);
+					const editedContent = await openInEditor(issue.message, filename);
+					const trimmed = editedContent.trim();
+
+					if (trimmed) {
+						prComments.push({
+							path: issue.file,
+							line: issue.line,
+							body: trimmed
+						});
+						console.log(`\x1b[32m✓ Saved comment for ${issue.file}:${issue.line}\x1b[0m\n`);
+					} else {
+						console.log(`\x1b[90m✗ Skipped comment for ${issue.file}:${issue.line} (file empty)\x1b[0m\n`);
 					}
 				}
 			}
