@@ -12,7 +12,7 @@ import { convertToOpenAIMessages, cleanModelText, parseTextToolCalls, convertToG
 import { writeDetails, getDetailsPath, setDetailsPath } from './src/utils/logger.js';
 import { loadCustomTheme, getCustomTheme } from './src/utils/theme.js';
 import { formatK, stripAnsi, getPRNameFromPPID, formatElapsedTime, formatProgressLine, formatToolCallProgress, processInlineStyles, formatTable, spawnInNewTerminalTab } from './src/utils/terminal.js';
-import { extractJsonBlock, formatCodeWithPrettier, formatMarkdownForTerminal, formatTodoListToMarkdown } from './src/utils/markdown.js';
+import { formatCodeWithPrettier, formatMarkdownForTerminal, formatTodoListToMarkdown } from './src/utils/markdown.js';
 import { findProjectRoot, getKittyScreenText, readTerminalBuffer, runProjectDryRun, isHighImpactCommand, getOSDescription, findNonoFiles } from './src/utils/system.js';
 import { findCorrespondingCall, matchesTarget, discardSpecificOutput, discardLastSteps } from './src/utils/history.js';
 
@@ -1097,12 +1097,102 @@ async function removeTodoItem({ id }) {
 }
 
 function isStateChangingTool(name) {
-	const read_only_tools = new Set(['list_directory_structure', 'view_file_contents', 'search_grep', 'view_file_git_diff', 'read_terminal_buffer', 'gemini_web_search', 'comment']);
+	const read_only_tools = new Set(['list_directory_structure', 'view_file_contents', 'search_grep', 'view_file_git_diff', 'read_terminal_buffer', 'gemini_web_search', 'comment', 'report_pr_issue', 'finish_pr_review']);
 	return !read_only_tools.has(name);
 }
 
 function areArgsEqual(args1, args2) {
 	return JSON.stringify(args1) === JSON.stringify(args2);
+}
+
+async function reportPrIssue(args) {
+	const { file, line, severity, message } = args;
+
+	if (!file || line === undefined || line === null || !message) {
+		return {
+			status: 'error',
+			message: 'Missing required parameters: file, line, and message are required when reporting an issue.'
+		};
+	}
+
+	clearProgress();
+	const severityStr = severity ? `**[${String(severity).toUpperCase()}]** ` : '';
+	console.log(`\n\x1b[36m✦ Proposed Comment for ${file}:${line}\x1b[0m`);
+	if (severity) {
+		console.log(`\x1b[33mSeverity:\x1b[0m ${severity}`);
+	}
+	console.log(`\x1b[33mMessage:\x1b[0m ${message}\n`);
+
+	if (isAutoMode) {
+		const commentBody = `${severityStr}${message}`;
+		prComments.push({
+			path: file,
+			line: parseInt(line, 10),
+			body: commentBody
+		});
+		console.log(`\x1b[32mAuto-accepted comment for ${file}:${line}.\x1b[0m\n`);
+		return {
+			status: 'success',
+			user_action: 'accepted',
+			message: `User accepted comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
+		};
+	}
+
+	while (true) {
+		const choice = await askUser('Choose action: [c]omment, [s]kip, [w]rite custom prompt, [q]uit: ');
+		const lower = choice.trim().toLowerCase();
+		if (lower === 'c' || lower === 'comment') {
+			const commentBody = `${severityStr}${message}`;
+			prComments.push({
+				path: file,
+				line: parseInt(line, 10),
+				body: commentBody
+			});
+			console.log(`\x1b[32mSaved comment for ${file}:${line}.\x1b[0m\n`);
+			return {
+				status: 'success',
+				user_action: 'commented',
+				message: `User accepted and saved comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
+			};
+		} else if (lower === 's' || lower === 'skip') {
+			console.log(`\x1b[90mSkipped comment for ${file}:${line}.\x1b[0m\n`);
+			return {
+				status: 'success',
+				user_action: 'skipped',
+				message: `User skipped comment for ${file}:${line}. Present the next issue if any, or call "finish_pr_review" if done.`
+			};
+		} else if (lower === 'w' || lower === 'write') {
+			const promptText = await askUser('Enter your prompt / question: ');
+			return {
+				status: 'user_feedback',
+				user_input: promptText,
+				message: `User provided feedback/question regarding ${file}:${line}: "${promptText}". Please answer their question or adjust the issue accordingly.`
+			};
+		} else if (lower === 'q' || lower === 'quit') {
+			prReviewFinished = true;
+			console.log('\x1b[33mExiting PR review loop.\x1b[0m\n');
+			return {
+				status: 'success',
+				user_action: 'quit',
+				message: 'User chose to quit the review loop.'
+			};
+		} else {
+			console.log('\x1b[31mInvalid choice. Please enter c, s, w, or q.\x1b[0m');
+		}
+	}
+}
+
+async function finishPrReview(args) {
+	clearProgress();
+	console.log('\n\x1b[32m✦ PR review complete. No further issues to report.\x1b[0m\n');
+	if (args && args.summary) {
+		console.log(`\x1b[90mSummary: ${args.summary}\x1b[0m\n`);
+	}
+	prReviewFinished = true;
+	return {
+		status: 'success',
+		message: 'PR review finished successfully.'
+	};
 }
 
 // Map tool name to implementation function
@@ -1124,6 +1214,8 @@ const tools_mapping = {
 	discard_last_steps: discardLastSteps,
 	gemini_web_search: geminiWebSearch,
 	comment: commentTool,
+	report_pr_issue: reportPrIssue,
+	finish_pr_review: finishPrReview,
 	final_answer: finalAnswerTool
 };
 
@@ -1134,6 +1226,66 @@ const is_kitty = process.env.TERM === 'xterm-kitty' || !!process.env.KITTY_PID |
 // ----------------------------------------------------
 // Gemini Tool Declarations
 // ----------------------------------------------------
+
+const view_file_git_diff_declaration = {
+	name: 'view_file_git_diff',
+	description: 'Shows the line-by-line git diff of a specific file in the PR branch compared to the base branch, or the entire PR git diff if file_path is omitted.',
+	parameters: {
+		type: 'OBJECT',
+		properties: {
+			base_branch: {
+				type: 'STRING',
+				description: 'The base branch of the PR.'
+			},
+			file_path: {
+				type: 'STRING',
+				description: 'The relative path of the file to inspect. If omitted, returns the diff for all changed files.'
+			}
+		},
+		required: ['base_branch']
+	}
+};
+
+const report_pr_issue_declaration = {
+	name: 'report_pr_issue',
+	description: 'Reports a code review issue found in a Pull Request.',
+	parameters: {
+		type: 'OBJECT',
+		properties: {
+			file: {
+				type: 'STRING',
+				description: 'The relative file path of the file containing the issue.'
+			},
+			line: {
+				type: 'INTEGER',
+				description: 'The 1-based line number in the file where the issue is located.'
+			},
+			severity: {
+				type: 'STRING',
+				description: 'The severity level of the issue (critical, high, medium, low).'
+			},
+			message: {
+				type: 'STRING',
+				description: 'A clear, concise, actionable feedback message to be posted as a comment on GitHub.'
+			}
+		},
+		required: ['file', 'line', 'message']
+	}
+};
+
+const finish_pr_review_declaration = {
+	name: 'finish_pr_review',
+	description: 'Signals that all changed files in the Pull Request have been analyzed and no further issues remain to report.',
+	parameters: {
+		type: 'OBJECT',
+		properties: {
+			summary: {
+				type: 'STRING',
+				description: 'An optional final summary of the PR review results.'
+			}
+		}
+	}
+};
 
 const tools_declarations = [
 	{
@@ -1393,27 +1545,10 @@ const tools_declarations = [
 					}
 				}
 			]
-		: [])
+		: []),
+	report_pr_issue_declaration,
+	finish_pr_review_declaration
 ];
-
-const view_file_git_diff_declaration = {
-	name: 'view_file_git_diff',
-	description: 'Shows the line-by-line git diff of a specific file in the PR branch compared to the base branch, or the entire PR git diff if file_path is omitted.',
-	parameters: {
-		type: 'OBJECT',
-		properties: {
-			base_branch: {
-				type: 'STRING',
-				description: 'The base branch of the PR.'
-			},
-			file_path: {
-				type: 'STRING',
-				description: 'The relative path of the file to inspect. If omitted, returns the diff for all changed files.'
-			}
-		},
-		required: ['base_branch']
-	}
-};
 
 let system_prompt = `You are Nono, a CLI coding agent and sys admin.
 You run on a ${os_name} host.
@@ -1460,27 +1595,17 @@ Constraints:
 - Task Tracking and TODO List: For any complex, debugging, implementation, or multi-step task, you MUST initialize a structured TODO list using "add_todo_item" on your very first step. As you work, you must update the status of these tasks using "update_todo_item" (marking them "in_progress" or "completed") to track your progress and let the user see your roadmap in real-time. Do NOT remove or delete completed tasks at the end of the task—keep them in the list so the user has a full, checkmarked record of your completed roadmap. Only use "remove_todo_item" if a task was added by mistake or is no longer relevant to the objective. The active list is automatically appended to your system instructions on every turn so you never lose track of your progress. For small, simple, or single-step tasks, you can skip the TODO list.
 
 Interaction Flow:
-- You MUST present issues one by one.
-- For each issue, you must output a description/explanation for the user, and you MUST end your message with a JSON block in the following format:
-\`\`\`json
-{
-  "file": "relative/path/to/file",
-  "line": <line_number_in_file>,
-  "severity": "critical" | "high" | "medium" | "low",
-  "message": "A clear, concise, actionable feedback message to be posted as a comment on GitHub."
-}
-\`\`\`
+- You MUST present issues one by one by calling the "report_pr_issue" function tool.
+- For each issue found, call "report_pr_issue" with:
+  - "file": relative file path
+  - "line": 1-based line number inside the file where the issue occurs
+  - "severity": "critical" | "high" | "medium" | "low"
+  - "message": A clear, concise, actionable feedback message to be posted as a comment on GitHub.
 - Only present ONE issue per turn. Do not present multiple issues at once.
 - The file path must be relative to the repository root and must be one of the files changed in the PR.
-- The line number must be a valid 1-based line number inside the file where the issue occurs (it must be on one of the added or modified lines in the pull request diff).
-- If the user asks questions or provides clarification (e.g. by choosing "write"), answer their question. If you still think there is an issue (or a modified version of it), output the JSON block with the same or updated details. If you realize the issue is not valid after the user's input, explain to the user and ask for the next step.
-- Once you have completed analyzing all changed files and there are no more issues to present, or if the user asks you to go to the next issue but no more issues exist, you MUST output:
-\`\`\`json
-{
-  "no_more_issues": true
-}
-\`\`\`
-and state that there are no further issues.`;
+- The line number must be a valid 1-based line number inside the file where the issue occurs.
+- If the user provides feedback or asks a question in the tool response, answer their question or adjust the issue accordingly.
+- Once you have completed analyzing all changed files and there are no more issues to present, you MUST call the "finish_pr_review" tool.`;
 
 // Gather content of all nono.md files found and append to system prompts
 const nonoFiles = findNonoFiles(process.cwd());
@@ -1568,7 +1693,7 @@ async function main() {
 	let user_query = '';
 	let isAutoMode = false;
 	const prComments = [];
-	let lastIssueJson = null;
+	let prReviewFinished = false;
 	let prOwner = '';
 	let prRepo = '';
 	let prPullNumber = '';
@@ -2882,7 +3007,9 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 						const systemInstruction = getSystemInstructionWithTodo(is_initial_pr_review ? pr_review_system_prompt : system_prompt);
 						const openAIMessages = convertToOpenAIMessages(history, systemInstruction);
 						const base_tools = is_initial_pr_review
-							? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+							? tools_declarations
+									.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name))
+									.concat([view_file_git_diff_declaration, report_pr_issue_declaration, finish_pr_review_declaration])
 							: tools_declarations;
 						const vllm_tools = base_tools.concat([gemini_web_search_declaration]);
 						const openAITools = convertGeminiToolsToOpenAI(vllm_tools);
@@ -2987,7 +3114,9 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 								tools: [
 									{
 										functionDeclarations: (is_initial_pr_review
-											? tools_declarations.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name)).concat([view_file_git_diff_declaration])
+											? tools_declarations
+													.filter(tool => ['list_directory_structure', 'view_file_contents', 'search_grep', 'execute_system_command'].includes(tool.name))
+													.concat([view_file_git_diff_declaration, report_pr_issue_declaration, finish_pr_review_declaration])
 											: tools_declarations
 										).concat([gemini_web_search_declaration])
 									}
@@ -3113,134 +3242,19 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 					clearProgress();
 
 					const text = text_part ? text_part.text : '';
-					const cleanText = text.replace(/```json[\s\S]*?```/, '').trim();
-					if (cleanText) {
-						const formatted = await formatMarkdownForTerminal(cleanText);
+					if (text && text.trim()) {
+						const formatted = await formatMarkdownForTerminal(text);
 						console.log(`\n\x1b[35m✦\x1b[0m ${formatted}\n`);
 					}
 
-					let issueJson = extractJsonBlock(text);
-					if (issueJson && issueJson.no_more_issues) {
-						console.log('\n\x1b[32m✦ All issues addressed.\x1b[0m\n');
-						break;
-					}
-
-					if (issueJson) {
-						lastIssueJson = issueJson;
-					} else if (lastIssueJson) {
-						issueJson = lastIssueJson;
-					}
-
-					if (issueJson && issueJson.file && issueJson.line && issueJson.message) {
-						console.log(`\x1b[33mProposed Issue:\x1b[0m`);
-						console.log(`  \x1b[1mFile:\x1b[0m ${issueJson.file}`);
-						console.log(`  \x1b[1mLine:\x1b[0m ${issueJson.line}`);
-						if (issueJson.severity) {
-							console.log(`  \x1b[1mSeverity:\x1b[0m ${issueJson.severity.toUpperCase()}`);
-						}
-						console.log(`  \x1b[1mComment:\x1b[0m ${issueJson.message}\n`);
-
-						if (isAutoMode) {
-							lastIssueJson = null;
-							const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
-							const commentBody = cleanText ? `${severityStr}${cleanText}` : `${severityStr}${issueJson.message}`;
-							prComments.push({
-								path: issueJson.file,
-								line: issueJson.line,
-								body: commentBody
-							});
-							history.push({
-								role: 'user',
-								parts: [
-									{
-										text: 'User chose to comment on this issue. Please present the next issue.'
-									}
-								]
-							});
-							console.log(`\x1b[32mAutomatically saved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
-						} else {
-							let validChoice = false;
-							while (!validChoice) {
-								const answer = await askUser('Choose an action [skip (s) / comment (c) / write (w)]: ');
-								const choice = answer.trim().toLowerCase();
-								if (choice === 's' || choice === 'skip') {
-									validChoice = true;
-									lastIssueJson = null;
-									history.push({
-										role: 'user',
-										parts: [
-											{
-												text: 'User chose to skip this issue. Please present the next issue.'
-											}
-										]
-									});
-									console.log('\x1b[90mSkipping issue...\x1b[0m\n');
-								} else if (choice === 'c' || choice === 'comment') {
-									validChoice = true;
-									lastIssueJson = null;
-									const severityStr = issueJson.severity ? `**[${issueJson.severity.toUpperCase()}]** ` : '';
-									const commentBody = cleanText ? `${severityStr}${cleanText}` : `${severityStr}${issueJson.message}`;
-									prComments.push({
-										path: issueJson.file,
-										line: issueJson.line,
-										body: commentBody
-									});
-									history.push({
-										role: 'user',
-										parts: [
-											{
-												text: 'User chose to comment on this issue. Please present the next issue.'
-											}
-										]
-									});
-									console.log(`\x1b[32mSaved comment for ${issueJson.file}:${issueJson.line}.\x1b[0m\n`);
-								} else if (choice === 'w' || choice === 'write') {
-									validChoice = true;
-									const promptText = await askUser('Enter your prompt / question: ');
-									history.push({
-										role: 'user',
-										parts: [{ text: promptText }]
-									});
-									console.log('\x1b[90mSending prompt to Nono...\x1b[0m\n');
-								} else {
-									console.log('\x1b[31mInvalid choice. Please type "skip", "comment", or "write".\x1b[0m');
-								}
+					history.push({
+						role: 'user',
+						parts: [
+							{
+								text: 'Please call the "report_pr_issue" tool to submit an issue, or call the "finish_pr_review" tool if no further issues remain.'
 							}
-						}
-					} else {
-						console.log('\x1b[33mWarning: Could not parse issue details from response.\x1b[0m');
-						if (isAutoMode) {
-							lastIssueJson = null;
-							history.push({
-								role: 'user',
-								parts: [
-									{
-										text: 'Please present the next issue (or state "No more issues" if there are none).'
-									}
-								]
-							});
-							console.log('\x1b[90mAutomatically proceeding to next issue...\x1b[0m\n');
-						} else {
-							const promptText = await askUser('Enter your prompt / question, or type "next" to continue: ');
-							if (promptText.trim().toLowerCase() === 'next') {
-								lastIssueJson = null;
-								history.push({
-									role: 'user',
-									parts: [
-										{
-											text: 'Please present the next issue (or state "No more issues" if there are none).'
-										}
-									]
-								});
-							} else {
-								history.push({
-									role: 'user',
-									parts: [{ text: promptText }]
-								});
-							}
-						}
-					}
-
+						]
+					});
 					pruneHistory(history);
 					fs.writeFileSync(session_path, JSON.stringify(history, null, 2), 'utf8');
 
@@ -3380,6 +3394,18 @@ Analyze the changed files, identify potential bugs or logic errors, and present 
 					);
 					break reactLoop;
 				}
+			}
+
+			if (prReviewFinished) {
+				await pushToHistoryAndCheckLimit(
+					history,
+					{
+						role: 'user',
+						parts: response_parts
+					},
+					session_path
+				);
+				break reactLoop;
 			}
 
 			// Push user/tool execution results back into the conversation history
